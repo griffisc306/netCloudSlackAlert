@@ -365,14 +365,30 @@ def build_slack_payload_from_cradlepoint_item(item):
     else:
         message = "[No message supplied]"
 
-    device_label = router_name or router_desc or device_id
-    fallback_text = f"{device_label}: {message}" if device_label else message
-    payload = build_basic_slack_payload(
-        "Cradlepoint Alert",
-        formatted_time,
-        message,
-        fallback_text,
-    )
+    alert_type = item.get("alert_type") or item.get("type") or "Unknown"
+
+    device_info = []
+    if router_name:
+        device_info.append(router_name)
+    if router_desc:
+        device_info.append(f"({router_desc})")
+    if router_mac:
+        device_info.append(f"[MAC: {router_mac}]")
+    if device_id:
+        device_info.append(f"[Device ID: {device_id}]")
+
+    lines = [
+        "*:rotating_light: CRADLEPOINT ALERT :rotating_light:*",
+        f"*Time*: {formatted_time}",
+    ]
+
+    if device_info:
+        lines.append(f"*Device*: {' '.join(device_info)}")
+
+    lines.append(f"*Message*: {message}")
+    lines.append(f"*Alert Type*: {alert_type}")
+
+    payload = {"text": "\n".join(lines)}
     return route, payload, []
 
 
