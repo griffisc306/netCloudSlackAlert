@@ -20,6 +20,10 @@ s3 = boto3.client("s3")
 
 SLACK_URL_CRADLEPOINT = os.environ["SLACK_URL_CRADLEPOINT"]
 SLACK_URL_CAM_MON = os.environ["SLACK_URL_CAM_MON"]
+SLACK_BOT_TOKEN_CRADLEPOINT = os.environ.get("SLACK_BOT_TOKEN_CRADLEPOINT")
+SLACK_CHANNEL_ID_CRADLEPOINT = os.environ.get("SLACK_CHANNEL_ID_CRADLEPOINT")
+SLACK_BOT_TOKEN_CAM_MON = os.environ.get("SLACK_BOT_TOKEN_CAM_MON")
+SLACK_CHANNEL_ID_CAM_MON = os.environ.get("SLACK_CHANNEL_ID_CAM_MON")
 S3_BUCKET_NAME = os.environ["S3_BUCKET_NAME"]
 PRESIGNED_URL_EXPIRES = int(os.environ.get("PRESIGNED_URL_EXPIRES", "3600"))
 
@@ -153,10 +157,18 @@ def normalize_source(source):
     raise ValueError(f"Unsupported source: {source}")
 
 
-def select_slack_url(source):
+def select_slack_route(source):
     route_map = {
-        "cradlepoint": SLACK_URL_CRADLEPOINT,
-        "cam_mon": SLACK_URL_CAM_MON,
+        "cradlepoint": {
+            "webhook_url": SLACK_URL_CRADLEPOINT,
+            "bot_token": SLACK_BOT_TOKEN_CRADLEPOINT,
+            "channel_id": SLACK_CHANNEL_ID_CRADLEPOINT,
+        },
+        "cam_mon": {
+            "webhook_url": SLACK_URL_CAM_MON,
+            "bot_token": SLACK_BOT_TOKEN_CAM_MON,
+            "channel_id": SLACK_CHANNEL_ID_CAM_MON,
+        },
     }
     return route_map[source]
 
@@ -221,22 +233,51 @@ def upload_image_to_s3(file_obj, source):
     }
 
 
+def build_image_attachment(filename, content_type, content):
+    if not content:
+        return None
+
+    return {
+        "filename": (filename or "image").replace("/", "_"),
+        "content_type": content_type or "application/octet-stream",
+        "content": content,
+    }
+
+
 def decode_base64_image(base64_data, source, filename):
     if not base64_data:
         return None
 
     try:
-        return upload_image_to_s3(
-            {
-                "filename": filename,
-                "content_type": "image/png",
-                "content": base64.b64decode(base64_data),
-            },
-            source,
+        return build_image_attachment(
+            filename,
+            "image/png",
+            base64.b64decode(base64_data),
         )
     except Exception:
-        logger.exception("Failed to decode or upload base64 image for source=%s", source)
+        logger.exception("Failed to decode base64 image for source=%s", source)
         return None
+
+
+def prepare_webhook_images(images, source):
+    webhook_images = []
+
+    for image in images:
+        if image.get("url"):
+            webhook_images.append(image)
+            continue
+
+        if not image.get("content"):
+            continue
+
+        uploaded = upload_image_to_s3(image, source)
+        webhook_images.append({
+            "filename": uploaded["filename"],
+            "content_type": uploaded["content_type"],
+            "url": uploaded["url"],
+        })
+
+    return webhook_images
 
 
 def append_uploaded_images_to_payload(payload, uploaded_images):
@@ -261,7 +302,7 @@ def append_uploaded_images_to_payload(payload, uploaded_images):
 
 def build_slack_payload_from_json(body):
     source = normalize_source(body.get("source"))
-    slack_url = select_slack_url(source)
+    route = select_slack_route(source)
 
     timestamp = format_time_to_eastern(body.get("timestamp"))
     text = body.get("text") or body.get("message") or "[No message supplied]"
@@ -291,14 +332,15 @@ def build_slack_payload_from_json(body):
             "url": image_url,
         })
 
-    append_uploaded_images_to_payload(payload, uploaded_images)
+    webhook_images = prepare_webhook_images(uploaded_images, source)
+    append_uploaded_images_to_payload(payload, webhook_images)
 
-    return slack_url, payload
+    return route, payload, uploaded_images
 
 
 def build_slack_payload_from_cradlepoint_item(item):
     source = "cradlepoint"
-    slack_url = select_slack_url(source)
+    route = select_slack_route(source)
 
     created_at = item.get("created_at") or item.get("detected_at")
     formatted_time = format_time_to_eastern(created_at)
@@ -325,21 +367,22 @@ def build_slack_payload_from_cradlepoint_item(item):
         message,
         fallback_text,
     )
-    return slack_url, payload
+    return route, payload, []
 
 
 def build_slack_payload_from_multipart(fields, files):
     source = normalize_source(fields.get("source"))
-    slack_url = select_slack_url(source)
+    route = select_slack_route(source)
 
     message = fields.get("message") or fields.get("text") or "[No message supplied]"
     timestamp = format_time_to_eastern(fields.get("timestamp"))
 
     uploaded_images = [
-        upload_image_to_s3(f, source)
+        build_image_attachment(f["filename"], f["content_type"], f["content"])
         for f in files
         if f["field_name"] == "images"
     ]
+    uploaded_images = [image for image in uploaded_images if image]
 
     if not uploaded_images:
         raise ValueError("No files found in 'images' field")
@@ -351,9 +394,10 @@ def build_slack_payload_from_multipart(fields, files):
     )
 
     payload = build_basic_slack_payload(title, timestamp, message, message)
-    append_uploaded_images_to_payload(payload, uploaded_images)
+    webhook_images = prepare_webhook_images(uploaded_images, source)
+    append_uploaded_images_to_payload(payload, webhook_images)
 
-    return slack_url, payload
+    return route, payload, uploaded_images
 
 
 def post_to_slack(webhook_url, payload):
@@ -367,6 +411,84 @@ def post_to_slack(webhook_url, payload):
     return response
 
 
+def slack_api_headers(bot_token):
+    return {
+        "Authorization": f"Bearer {bot_token}",
+    }
+
+
+def post_file_to_upload_url(upload_url, image):
+    response = requests.post(
+        upload_url,
+        data=image["content"],
+        headers={"Content-Type": image["content_type"]},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response
+
+
+def upload_image_to_slack(bot_token, channel_id, image):
+    metadata_response = requests.post(
+        "https://slack.com/api/files.getUploadURLExternal",
+        data={
+            "filename": image["filename"],
+            "length": len(image["content"]),
+        },
+        headers=slack_api_headers(bot_token),
+        timeout=15,
+    )
+    metadata_response.raise_for_status()
+    metadata = metadata_response.json()
+    if not metadata.get("ok"):
+        raise requests.exceptions.RequestException(
+            f"Slack file upload init failed: {metadata.get('error', 'unknown_error')}"
+        )
+
+    upload_url = metadata["upload_url"]
+    file_id = metadata["file_id"]
+
+    post_file_to_upload_url(upload_url, image)
+
+    complete_response = requests.post(
+        "https://slack.com/api/files.completeUploadExternal",
+        data={
+            "channel_id": channel_id,
+            "files": json.dumps([{
+                "id": file_id,
+                "title": image["filename"],
+            }]),
+        },
+        headers=slack_api_headers(bot_token),
+        timeout=15,
+    )
+    complete_response.raise_for_status()
+    complete_payload = complete_response.json()
+    if not complete_payload.get("ok"):
+        raise requests.exceptions.RequestException(
+            f"Slack file upload complete failed: {complete_payload.get('error', 'unknown_error')}"
+        )
+
+    return complete_response
+
+
+def upload_images_to_slack(route, images):
+    bot_token = route.get("bot_token")
+    channel_id = route.get("channel_id")
+
+    if not bot_token or not channel_id:
+        logger.info("Skipping direct Slack upload because bot token or channel ID is missing")
+        return []
+
+    uploaded_responses = []
+    for image in images:
+        if not image.get("content"):
+            continue
+        uploaded_responses.append(upload_image_to_slack(bot_token, channel_id, image))
+
+    return uploaded_responses
+
+
 def lambda_handler(event, context):
     try:
         logger.info("Raw event: %s", json.dumps(event))
@@ -377,27 +499,29 @@ def lambda_handler(event, context):
             fields, files = parse_multipart_form(event)
             logger.info("Parsed multipart fields: %s", json.dumps(fields))
             logger.info("Parsed multipart file count: %d", len(files))
-            slack_url, payload = build_slack_payload_from_multipart(fields, files)
+            route, payload, uploaded_images = build_slack_payload_from_multipart(fields, files)
 
         elif "application/json" in content_type.lower():
             body = parse_json_body(event)
             logger.info("Parsed JSON body: %s", json.dumps(body))
 
             if isinstance(body.get("data"), list) and body["data"]:
-                slack_url, payload = build_slack_payload_from_cradlepoint_item(body["data"][0])
+                route, payload, uploaded_images = build_slack_payload_from_cradlepoint_item(body["data"][0])
             else:
-                slack_url, payload = build_slack_payload_from_json(body)
+                route, payload, uploaded_images = build_slack_payload_from_json(body)
 
         else:
             raise ValueError(f"Unsupported Content-Type: {content_type}")
 
-        slack_response = post_to_slack(slack_url, payload)
+        slack_response = post_to_slack(route["webhook_url"], payload)
+        file_upload_responses = upload_images_to_slack(route, uploaded_images)
 
         return {
             "statusCode": 200,
             "body": json.dumps({
                 "message": "Webhook processed successfully",
-                "slack_status": slack_response.status_code
+                "slack_status": slack_response.status_code,
+                "slack_file_uploads": len(file_upload_responses),
             })
         }
 
