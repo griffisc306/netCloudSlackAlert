@@ -162,10 +162,7 @@ def select_slack_url(source):
 
 
 def format_message_for_slack(message):
-    cleaned = (message or "[No message supplied]").strip()
-    if "\n" in cleaned:
-        return f"```{cleaned}```"
-    return cleaned
+    return (message or "[No message supplied]").strip()
 
 
 def build_basic_slack_payload(title, timestamp, message, fallback_text):
@@ -224,6 +221,44 @@ def upload_image_to_s3(file_obj, source):
     }
 
 
+def decode_base64_image(base64_data, source, filename):
+    if not base64_data:
+        return None
+
+    try:
+        return upload_image_to_s3(
+            {
+                "filename": filename,
+                "content_type": "image/png",
+                "content": base64.b64decode(base64_data),
+            },
+            source,
+        )
+    except Exception:
+        logger.exception("Failed to decode or upload base64 image for source=%s", source)
+        return None
+
+
+def append_uploaded_images_to_payload(payload, uploaded_images):
+    if not uploaded_images:
+        return payload
+
+    blocks = payload["blocks"]
+
+    for image in uploaded_images:
+        blocks.append({
+            "type": "image",
+            "image_url": image["url"],
+            "alt_text": image["filename"],
+            "title": {
+                "type": "plain_text",
+                "text": image["filename"]
+            }
+        })
+
+    return payload
+
+
 def build_slack_payload_from_json(body):
     source = normalize_source(body.get("source"))
     slack_url = select_slack_url(source)
@@ -238,6 +273,25 @@ def build_slack_payload_from_json(body):
     )
 
     payload = build_basic_slack_payload(title, timestamp, text, text)
+    uploaded_images = []
+
+    chart_image = decode_base64_image(
+        body.get("chart_image_base64_png"),
+        source,
+        "chart.png",
+    )
+    if chart_image:
+        uploaded_images.append(chart_image)
+
+    image_url = body.get("image_url")
+    if image_url:
+        uploaded_images.append({
+            "filename": "image",
+            "content_type": "image/url",
+            "url": image_url,
+        })
+
+    append_uploaded_images_to_payload(payload, uploaded_images)
 
     return slack_url, payload
 
@@ -297,18 +351,7 @@ def build_slack_payload_from_multipart(fields, files):
     )
 
     payload = build_basic_slack_payload(title, timestamp, message, message)
-    blocks = payload["blocks"]
-
-    for image in uploaded_images:
-        blocks.append({
-            "type": "image",
-            "image_url": image["url"],
-            "alt_text": image["filename"],
-            "title": {
-                "type": "plain_text",
-                "text": image["filename"]
-            }
-        })
+    append_uploaded_images_to_payload(payload, uploaded_images)
 
     return slack_url, payload
 
