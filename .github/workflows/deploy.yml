@@ -26,8 +26,8 @@ jobs:
       - name: Deploy to Lambda
         uses: aws-actions/aws-lambda-deploy@v1
         with:
-          function-name: YOUR_FUNCTION_NAME
+          function-name: netCloudSlackAlert
           code-artifacts-dir: .
           handler: lambda_function.lambda_handler
           runtime: python3.12
-          role: arn:aws:iam::YOUR-ACCOUNT-ID:role/YOUR-LAMBDA-ROLE
+          role: arn:aws:iam::597141907380:role/service-role/netCloudSlackAlert-role-3jt2lx4s
