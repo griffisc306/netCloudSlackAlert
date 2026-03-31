@@ -244,6 +244,10 @@ def build_image_attachment(filename, content_type, content):
     }
 
 
+def route_supports_direct_slack_upload(route):
+    return bool(route.get("bot_token") and route.get("channel_id"))
+
+
 def decode_base64_image(base64_data, source, filename):
     if not base64_data:
         return None
@@ -332,7 +336,11 @@ def build_slack_payload_from_json(body):
             "url": image_url,
         })
 
-    webhook_images = prepare_webhook_images(uploaded_images, source)
+    if route_supports_direct_slack_upload(route):
+        webhook_images = [image for image in uploaded_images if image.get("url")]
+    else:
+        webhook_images = prepare_webhook_images(uploaded_images, source)
+
     append_uploaded_images_to_payload(payload, webhook_images)
 
     return route, payload, uploaded_images
@@ -394,7 +402,11 @@ def build_slack_payload_from_multipart(fields, files):
     )
 
     payload = build_basic_slack_payload(title, timestamp, message, message)
-    webhook_images = prepare_webhook_images(uploaded_images, source)
+    if route_supports_direct_slack_upload(route):
+        webhook_images = [image for image in uploaded_images if image.get("url")]
+    else:
+        webhook_images = prepare_webhook_images(uploaded_images, source)
+
     append_uploaded_images_to_payload(payload, webhook_images)
 
     return route, payload, uploaded_images
