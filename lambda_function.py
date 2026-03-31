@@ -20,8 +20,6 @@ s3 = boto3.client("s3")
 
 SLACK_URL_CRADLEPOINT = os.environ["SLACK_URL_CRADLEPOINT"]
 SLACK_URL_CAM_MON = os.environ["SLACK_URL_CAM_MON"]
-SLACK_BOT_TOKEN_CRADLEPOINT = os.environ.get("SLACK_BOT_TOKEN_CRADLEPOINT")
-SLACK_CHANNEL_ID_CRADLEPOINT = os.environ.get("SLACK_CHANNEL_ID_CRADLEPOINT")
 SLACK_BOT_TOKEN_CAM_MON = os.environ.get("SLACK_BOT_TOKEN_CAM_MON")
 SLACK_CHANNEL_ID_CAM_MON = os.environ.get("SLACK_CHANNEL_ID_CAM_MON")
 S3_BUCKET_NAME = os.environ["S3_BUCKET_NAME"]
@@ -161,8 +159,8 @@ def select_slack_route(source):
     route_map = {
         "cradlepoint": {
             "webhook_url": SLACK_URL_CRADLEPOINT,
-            "bot_token": SLACK_BOT_TOKEN_CRADLEPOINT,
-            "channel_id": SLACK_CHANNEL_ID_CRADLEPOINT,
+            "bot_token": None,
+            "channel_id": None,
         },
         "cam_mon": {
             "webhook_url": SLACK_URL_CAM_MON,

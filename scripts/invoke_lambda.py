@@ -51,8 +51,6 @@ def main():
     os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
     os.environ.setdefault("SLACK_URL_CRADLEPOINT", "https://example.com/slack/cradlepoint")
     os.environ.setdefault("SLACK_URL_CAM_MON", "https://example.com/slack/cam-mon")
-    os.environ.setdefault("SLACK_BOT_TOKEN_CRADLEPOINT", "xoxb-test-cradlepoint")
-    os.environ.setdefault("SLACK_CHANNEL_ID_CRADLEPOINT", "C123CRADLEPOINT")
     os.environ.setdefault("SLACK_BOT_TOKEN_CAM_MON", "xoxb-test-cam-mon")
     os.environ.setdefault("SLACK_CHANNEL_ID_CAM_MON", "C123CAMMON")
     os.environ.setdefault("S3_BUCKET_NAME", "test-bucket")
