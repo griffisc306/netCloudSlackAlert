@@ -13,8 +13,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Zip function
-        run: zip -r function.zip . -x ".git/*" ".github/*"
+      - name: Prepare deployment package
+        run: |
+          mkdir -p package
+          cp lambda_function.py package/
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -27,7 +29,7 @@ jobs:
         uses: aws-actions/aws-lambda-deploy@v1
         with:
           function-name: netCloudSlackAlert
-          code-artifacts-dir: .
+          code-artifacts-dir: ./package
           handler: lambda_function.lambda_handler
           runtime: python3.12
           role: arn:aws:iam::597141907380:role/service-role/netCloudSlackAlert-role-3jt2lx4s
