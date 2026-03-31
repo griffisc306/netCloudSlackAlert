@@ -32,4 +32,3 @@ jobs:
           code-artifacts-dir: ./package
           handler: lambda_function.lambda_handler
           runtime: python3.12
-          role: arn:aws:iam::597141907380:role/service-role/netCloudSlackAlert-role-3jt2lx4s
