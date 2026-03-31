@@ -1,0 +1,7 @@
+{
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": "{\"source\": \"cam_mon\", \"event\": \"Console Test\", \"timestamp\": \"2026-03-31T14:30:00Z\", \"message\": \"Smoke test from GitHub Actions\", \"device_id\": \"CI-TEST\"}",
+  "isBase64Encoded": false
+}
