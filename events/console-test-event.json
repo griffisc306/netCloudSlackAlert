@@ -1,4 +1,4 @@
- {
+{
     "version": "2.0",
     "routeKey": "POST /webhook",
     "rawPath": "/Prod/webhook",
