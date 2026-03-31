@@ -161,6 +161,45 @@ def select_slack_url(source):
     return route_map[source]
 
 
+def format_message_for_slack(message):
+    cleaned = (message or "[No message supplied]").strip()
+    if "\n" in cleaned:
+        return f"```{cleaned}```"
+    return cleaned
+
+
+def build_basic_slack_payload(title, timestamp, message, fallback_text):
+    return {
+        "text": fallback_text,
+        "blocks": [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": title,
+                    "emoji": True,
+                }
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Time:* {timestamp}",
+                    }
+                ]
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": format_message_for_slack(message),
+                }
+            }
+        ]
+    }
+
+
 def upload_image_to_s3(file_obj, source):
     filename = file_obj["filename"].replace("/", "_")
     key = f"webhook-images/{source}/{int(time.time())}-{uuid.uuid4().hex}-{filename}"
@@ -189,36 +228,16 @@ def build_slack_payload_from_json(body):
     source = normalize_source(body.get("source"))
     slack_url = select_slack_url(source)
 
-    event_name = body.get("event") or body.get("alert_type") or "event"
     timestamp = format_time_to_eastern(body.get("timestamp"))
     text = body.get("text") or body.get("message") or "[No message supplied]"
-    device_id = body.get("device_id") or "Unknown"
 
     title = (
-        "*:camera: CAMERA ALERT :camera:*"
+        "Camera Alert"
         if source == "cam_mon"
-        else "*:rotating_light: CRADLEPOINT ALERT :rotating_light:*"
+        else "Cradlepoint Alert"
     )
 
-    payload = {
-        "text": f"{event_name} from {device_id}",
-        "blocks": [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"{title}\n"
-                        f"*Time*: {timestamp}\n"
-                        f"*Source*: `{source}`\n"
-                        f"*Event*: {event_name}\n"
-                        f"*Device ID*: {device_id}\n"
-                        f"*Message*: {text}"
-                    )
-                }
-            }
-        ]
-    }
+    payload = build_basic_slack_payload(title, timestamp, text, text)
 
     return slack_url, payload
 
@@ -244,30 +263,14 @@ def build_slack_payload_from_cradlepoint_item(item):
     else:
         message = "[No message supplied]"
 
-    alert_type = item.get("alert_type") or item.get("type") or "Unknown"
-
-    device_info = []
-    if router_name:
-        device_info.append(router_name)
-    if router_desc:
-        device_info.append(f"({router_desc})")
-    if router_mac:
-        device_info.append(f"[MAC: {router_mac}]")
-    if device_id:
-        device_info.append(f"[Device ID: {device_id}]")
-
-    lines = [
-        "*:rotating_light: CRADLEPOINT ALERT :rotating_light:*",
-        f"*Time*: {formatted_time}",
-    ]
-
-    if device_info:
-        lines.append(f"*Device*: {' '.join(device_info)}")
-
-    lines.append(f"*Message*: {message}")
-    lines.append(f"*Alert Type*: {alert_type}")
-
-    payload = {"text": "\n".join(lines)}
+    device_label = router_name or router_desc or device_id
+    fallback_text = f"{device_label}: {message}" if device_label else message
+    payload = build_basic_slack_payload(
+        "Cradlepoint Alert",
+        formatted_time,
+        message,
+        fallback_text,
+    )
     return slack_url, payload
 
 
@@ -276,8 +279,6 @@ def build_slack_payload_from_multipart(fields, files):
     slack_url = select_slack_url(source)
 
     message = fields.get("message") or fields.get("text") or "[No message supplied]"
-    alert_type = fields.get("alert_type") or fields.get("event") or "camera_event"
-    device_id = fields.get("device_id") or "Unknown"
     timestamp = format_time_to_eastern(fields.get("timestamp"))
 
     uploaded_images = [
@@ -290,27 +291,13 @@ def build_slack_payload_from_multipart(fields, files):
         raise ValueError("No files found in 'images' field")
 
     title = (
-        "*:camera: CAMERA ALERT :camera:*"
+        "Camera Alert"
         if source == "cam_mon"
-        else "*:rotating_light: ALERT :rotating_light:*"
+        else "Alert"
     )
 
-    blocks = [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (
-                    f"{title}\n"
-                    f"*Time*: {timestamp}\n"
-                    f"*Source*: `{source}`\n"
-                    f"*Device ID*: {device_id}\n"
-                    f"*Alert Type*: {alert_type}\n"
-                    f"*Message*: {message}"
-                )
-            }
-        }
-    ]
+    payload = build_basic_slack_payload(title, timestamp, message, message)
+    blocks = payload["blocks"]
 
     for image in uploaded_images:
         blocks.append({
@@ -322,11 +309,6 @@ def build_slack_payload_from_multipart(fields, files):
                 "text": image["filename"]
             }
         })
-
-    payload = {
-        "text": f"{alert_type} from {device_id}",
-        "blocks": blocks
-    }
 
     return slack_url, payload
 
