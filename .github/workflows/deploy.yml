@@ -1,0 +1,33 @@
+name: Deploy Lambda
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Zip function
+        run: zip -r function.zip . -x ".git/*" ".github/*"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Deploy to Lambda
+        uses: aws-actions/aws-lambda-deploy@v1
+        with:
+          function-name: YOUR_FUNCTION_NAME
+          code-artifacts-dir: .
+          handler: lambda_function.lambda_handler
+          runtime: python3.12
+          role: arn:aws:iam::YOUR-ACCOUNT-ID:role/YOUR-LAMBDA-ROLE
