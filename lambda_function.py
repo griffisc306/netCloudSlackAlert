@@ -3,15 +3,15 @@ import json
 import time
 import uuid
 import re
-import boto3
-import requests
+import boto3 # pyright: ignore[reportMissingImports]
+import requests # type: ignore
 import logging
 import base64
 from datetime import datetime
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
-    from pytz import timezone as ZoneInfo
+    from pytz import timezone as ZoneInfo # pyright: ignore[reportMissingModuleSource]
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
