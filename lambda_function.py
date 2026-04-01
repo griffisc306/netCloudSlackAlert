@@ -26,8 +26,8 @@ S3_BUCKET_NAME = os.environ["S3_BUCKET_NAME"]
 PRESIGNED_URL_EXPIRES = int(os.environ.get("PRESIGNED_URL_EXPIRES", "3600"))
 
 HEADERS = {"Content-Type": "application/json"}
-SLACK_POST_RETRY_DELAY_SECONDS = float(os.environ.get("SLACK_POST_RETRY_DELAY_SECONDS", "1.0"))
-SLACK_POST_MAX_ATTEMPTS = int(os.environ.get("SLACK_POST_MAX_ATTEMPTS", "3"))
+SLACK_POST_RETRY_DELAY_SECONDS = float(os.environ.get("SLACK_POST_RETRY_DELAY_SECONDS", "1.5"))
+SLACK_POST_MAX_ATTEMPTS = int(os.environ.get("SLACK_POST_MAX_ATTEMPTS", "5"))
 DEFAULT_HTTP_TIMEOUT_SECONDS = 15
 UPLOAD_HTTP_TIMEOUT_SECONDS = 30
 
@@ -555,13 +555,14 @@ def post_message_to_slack(route, payload):
         )
 
         if invalid_slack_file and attempt < SLACK_POST_MAX_ATTEMPTS:
+            sleep_seconds = SLACK_POST_RETRY_DELAY_SECONDS * attempt
             logger.warning(
                 "Slack file block not ready yet; retrying chat.postMessage attempt=%d/%d delay=%.1fs",
                 attempt,
                 SLACK_POST_MAX_ATTEMPTS,
-                SLACK_POST_RETRY_DELAY_SECONDS,
+                sleep_seconds,
             )
-            time.sleep(SLACK_POST_RETRY_DELAY_SECONDS)
+            time.sleep(sleep_seconds)
             continue
 
         raise HTTPRequestError(
@@ -629,7 +630,7 @@ def upload_image_to_slack(bot_token, image):
 
     slack_file_url = None
     if isinstance(file_info, dict):
-        slack_file_url = file_info.get("url_private") or file_info.get("permalink")
+        slack_file_url = file_info.get("permalink") or file_info.get("url_private")
 
     return {
         "filename": image["filename"],
