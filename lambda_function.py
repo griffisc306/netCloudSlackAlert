@@ -461,8 +461,11 @@ def post_message_to_slack(route, payload):
     response.raise_for_status()
     response_payload = response.json()
     if not response_payload.get("ok"):
+        response_metadata = response_payload.get("response_metadata") or {}
+        detail_messages = response_metadata.get("messages") or []
+        detail_suffix = f" details={detail_messages}" if detail_messages else ""
         raise requests.exceptions.RequestException(
-            f"Slack chat.postMessage failed: {response_payload.get('error', 'unknown_error')}"
+            f"Slack chat.postMessage failed: {response_payload.get('error', 'unknown_error')}{detail_suffix}"
         )
     return response
 
