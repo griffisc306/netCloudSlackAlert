@@ -307,6 +307,16 @@ def prepare_webhook_images(images, source):
     return webhook_images
 
 
+def prepare_message_images(route, images, source):
+    if route_supports_direct_slack_upload(route):
+        direct_images = [image for image in images if image.get("content")]
+        external_images = [image for image in images if image.get("url") and not image.get("content")]
+        uploaded_images = upload_images_to_slack(route, direct_images)
+        return uploaded_images + external_images
+
+    return prepare_webhook_images(images, source)
+
+
 def append_uploaded_images_to_payload(payload, uploaded_images):
     if not uploaded_images:
         return payload
@@ -364,9 +374,8 @@ def build_slack_payload_from_json(body):
             "url": image_url,
         })
 
-    webhook_images = prepare_webhook_images(uploaded_images, source)
-
-    append_uploaded_images_to_payload(payload, webhook_images)
+    message_images = prepare_message_images(route, uploaded_images, source)
+    append_uploaded_images_to_payload(payload, message_images)
 
     return route, payload, uploaded_images
 
@@ -443,9 +452,8 @@ def build_slack_payload_from_multipart(fields, files):
     )
 
     payload = build_basic_slack_payload(title, timestamp, message, message)
-    webhook_images = prepare_webhook_images(uploaded_images, source)
-
-    append_uploaded_images_to_payload(payload, webhook_images)
+    message_images = prepare_message_images(route, uploaded_images, source)
+    append_uploaded_images_to_payload(payload, message_images)
 
     return route, payload, uploaded_images
 
