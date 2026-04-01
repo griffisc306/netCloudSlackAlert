@@ -511,7 +511,7 @@ def post_file_to_upload_url(upload_url, image):
     return response
 
 
-def upload_image_to_slack(bot_token, image):
+def upload_image_to_slack(bot_token, image, channel_id=None):
     metadata_response = requests.post(
         "https://slack.com/api/files.getUploadURLExternal",
         data={
@@ -540,6 +540,7 @@ def upload_image_to_slack(bot_token, image):
                 "id": file_id,
                 "title": image["filename"],
             }]),
+            **({"channel_id": channel_id} if channel_id else {}),
         },
         headers=slack_api_headers(bot_token),
         timeout=15,
@@ -570,7 +571,7 @@ def upload_images_to_slack(route, images):
     for image in images:
         if not image.get("content"):
             continue
-        uploaded_images.append(upload_image_to_slack(bot_token, image))
+        uploaded_images.append(upload_image_to_slack(bot_token, image, channel_id))
 
     return uploaded_images
 
