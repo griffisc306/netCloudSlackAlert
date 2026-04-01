@@ -343,6 +343,15 @@ def append_uploaded_images_to_payload(payload, uploaded_images):
     return payload
 
 
+def count_slack_file_blocks(payload):
+    blocks = payload.get("blocks") or []
+    return sum(
+        1
+        for block in blocks
+        if block.get("type") == "image" and block.get("slack_file")
+    )
+
+
 def build_slack_payload_from_json(body):
     source = normalize_source(body.get("source"))
     route = with_channel_override(
@@ -597,7 +606,7 @@ def upload_images_to_slack(route, images):
     bot_token = route.get("bot_token")
 
     if not bot_token:
-        logger.info("Skipping direct Slack upload because bot token or channel ID is missing")
+        logger.info("Skipping direct Slack upload because bot token is missing")
         return []
 
     uploaded_images = []
@@ -643,15 +652,15 @@ def lambda_handler(event, context):
         else:
             raise ValueError(f"Unsupported Content-Type: {content_type}")
 
-        uploaded_slack_images = []
         slack_response = send_slack_message(route, payload)
+        slack_file_uploads = count_slack_file_blocks(payload)
 
         return {
             "statusCode": 200,
             "body": json.dumps({
                 "message": "Webhook processed successfully",
                 "slack_status": slack_response.status_code,
-                "slack_file_uploads": len(uploaded_slack_images),
+                "slack_file_uploads": slack_file_uploads,
             })
         }
 
