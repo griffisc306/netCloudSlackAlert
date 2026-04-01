@@ -171,6 +171,15 @@ def select_slack_route(source):
     return route_map[source]
 
 
+def with_channel_override(route, channel_id_override):
+    if not channel_id_override:
+        return route
+
+    updated_route = dict(route)
+    updated_route["channel_id"] = channel_id_override
+    return updated_route
+
+
 def format_message_for_slack(message):
     return (message or "[No message supplied]").strip()
 
@@ -289,22 +298,31 @@ def append_uploaded_images_to_payload(payload, uploaded_images):
     blocks = payload["blocks"]
 
     for image in uploaded_images:
-        blocks.append({
+        block = {
             "type": "image",
-            "image_url": image["url"],
             "alt_text": image["filename"],
             "title": {
                 "type": "plain_text",
                 "text": image["filename"]
             }
-        })
+        }
+
+        if image.get("slack_file_id"):
+            block["slack_file"] = {"id": image["slack_file_id"]}
+        else:
+            block["image_url"] = image["url"]
+
+        blocks.append(block)
 
     return payload
 
 
 def build_slack_payload_from_json(body):
     source = normalize_source(body.get("source"))
-    route = select_slack_route(source)
+    route = with_channel_override(
+        select_slack_route(source),
+        body.get("slack_channel_id_override"),
+    )
 
     timestamp = format_time_to_eastern(body.get("timestamp"))
     text = body.get("text") or body.get("message") or "[No message supplied]"
@@ -344,9 +362,9 @@ def build_slack_payload_from_json(body):
     return route, payload, uploaded_images
 
 
-def build_slack_payload_from_cradlepoint_item(item):
+def build_slack_payload_from_cradlepoint_item(item, channel_id_override=None):
     source = "cradlepoint"
-    route = select_slack_route(source)
+    route = with_channel_override(select_slack_route(source), channel_id_override)
 
     created_at = item.get("created_at") or item.get("detected_at")
     formatted_time = format_time_to_eastern(created_at)
@@ -394,7 +412,7 @@ def build_slack_payload_from_cradlepoint_item(item):
 
 def build_slack_payload_from_multipart(fields, files):
     source = normalize_source(fields.get("source"))
-    route = select_slack_route(source)
+    route = with_channel_override(route=select_slack_route(source), channel_id_override=fields.get("slack_channel_id_override"))
 
     message = fields.get("message") or fields.get("text") or "[No message supplied]"
     timestamp = format_time_to_eastern(fields.get("timestamp"))
@@ -437,6 +455,28 @@ def post_to_slack(webhook_url, payload):
     return response
 
 
+def post_message_to_slack(route, payload):
+    response = requests.post(
+        "https://slack.com/api/chat.postMessage",
+        json={
+            "channel": route["channel_id"],
+            **payload,
+        },
+        headers={
+            **slack_api_headers(route["bot_token"]),
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    response_payload = response.json()
+    if not response_payload.get("ok"):
+        raise requests.exceptions.RequestException(
+            f"Slack chat.postMessage failed: {response_payload.get('error', 'unknown_error')}"
+        )
+    return response
+
+
 def slack_api_headers(bot_token):
     return {
         "Authorization": f"Bearer {bot_token}",
@@ -454,7 +494,7 @@ def post_file_to_upload_url(upload_url, image):
     return response
 
 
-def upload_image_to_slack(bot_token, channel_id, image):
+def upload_image_to_slack(bot_token, image):
     metadata_response = requests.post(
         "https://slack.com/api/files.getUploadURLExternal",
         data={
@@ -479,7 +519,6 @@ def upload_image_to_slack(bot_token, channel_id, image):
     complete_response = requests.post(
         "https://slack.com/api/files.completeUploadExternal",
         data={
-            "channel_id": channel_id,
             "files": json.dumps([{
                 "id": file_id,
                 "title": image["filename"],
@@ -495,7 +534,11 @@ def upload_image_to_slack(bot_token, channel_id, image):
             f"Slack file upload complete failed: {complete_payload.get('error', 'unknown_error')}"
         )
 
-    return complete_response
+    return {
+        "filename": image["filename"],
+        "content_type": image["content_type"],
+        "slack_file_id": file_id,
+    }
 
 
 def upload_images_to_slack(route, images):
@@ -506,13 +549,20 @@ def upload_images_to_slack(route, images):
         logger.info("Skipping direct Slack upload because bot token or channel ID is missing")
         return []
 
-    uploaded_responses = []
+    uploaded_images = []
     for image in images:
         if not image.get("content"):
             continue
-        uploaded_responses.append(upload_image_to_slack(bot_token, channel_id, image))
+        uploaded_images.append(upload_image_to_slack(bot_token, image))
 
-    return uploaded_responses
+    return uploaded_images
+
+
+def send_slack_message(route, payload):
+    if route_supports_direct_slack_upload(route):
+        return post_message_to_slack(route, payload)
+
+    return post_to_slack(route["webhook_url"], payload)
 
 
 def lambda_handler(event, context):
@@ -532,22 +582,26 @@ def lambda_handler(event, context):
             logger.info("Parsed JSON body: %s", json.dumps(body))
 
             if isinstance(body.get("data"), list) and body["data"]:
-                route, payload, uploaded_images = build_slack_payload_from_cradlepoint_item(body["data"][0])
+                route, payload, uploaded_images = build_slack_payload_from_cradlepoint_item(
+                    body["data"][0],
+                    body.get("slack_channel_id_override"),
+                )
             else:
                 route, payload, uploaded_images = build_slack_payload_from_json(body)
 
         else:
             raise ValueError(f"Unsupported Content-Type: {content_type}")
 
-        slack_response = post_to_slack(route["webhook_url"], payload)
-        file_upload_responses = upload_images_to_slack(route, uploaded_images)
+        uploaded_slack_images = upload_images_to_slack(route, uploaded_images)
+        append_uploaded_images_to_payload(payload, uploaded_slack_images)
+        slack_response = send_slack_message(route, payload)
 
         return {
             "statusCode": 200,
             "body": json.dumps({
                 "message": "Webhook processed successfully",
                 "slack_status": slack_response.status_code,
-                "slack_file_uploads": len(file_upload_responses),
+                "slack_file_uploads": len(uploaded_slack_images),
             })
         }
 

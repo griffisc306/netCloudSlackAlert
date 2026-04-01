@@ -45,6 +45,10 @@ def main():
         action="store_true",
         help="Use real outbound network calls instead of mocked Slack/S3 calls",
     )
+    parser.add_argument(
+        "--channel-id",
+        help="Override the Slack channel ID in the JSON request body for bot-token routes",
+    )
     args = parser.parse_args()
 
     os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
@@ -58,6 +62,17 @@ def main():
 
     with open(args.event_path, "r", encoding="utf-8") as event_file:
         event = json.load(event_file)
+
+    if args.channel_id:
+        body = event.get("body")
+        if isinstance(body, str):
+            parsed_body = json.loads(body)
+        elif isinstance(body, dict):
+            parsed_body = dict(body)
+        else:
+            parsed_body = {}
+        parsed_body["slack_channel_id_override"] = args.channel_id
+        event["body"] = json.dumps(parsed_body)
 
     with mock.patch("boto3.client", return_value=DummyS3Client()):
         lambda_module = importlib.import_module("lambda_function")
