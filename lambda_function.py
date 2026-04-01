@@ -26,6 +26,8 @@ S3_BUCKET_NAME = os.environ["S3_BUCKET_NAME"]
 PRESIGNED_URL_EXPIRES = int(os.environ.get("PRESIGNED_URL_EXPIRES", "3600"))
 
 HEADERS = {"Content-Type": "application/json"}
+SLACK_POST_RETRY_DELAY_SECONDS = float(os.environ.get("SLACK_POST_RETRY_DELAY_SECONDS", "1.0"))
+SLACK_POST_MAX_ATTEMPTS = int(os.environ.get("SLACK_POST_MAX_ATTEMPTS", "3"))
 
 
 def format_time_to_eastern(dt_str=None):
@@ -470,28 +472,49 @@ def post_to_slack(webhook_url, payload):
 
 
 def post_message_to_slack(route, payload):
-    response = requests.post(
-        "https://slack.com/api/chat.postMessage",
-        json={
-            "channel": route["channel_id"],
-            **payload,
-        },
-        headers={
-            **slack_api_headers(route["bot_token"]),
-            "Content-Type": "application/json; charset=utf-8",
-        },
-        timeout=15,
-    )
-    response.raise_for_status()
-    response_payload = response.json()
-    if not response_payload.get("ok"):
+    request_payload = {
+        "channel": route["channel_id"],
+        **payload,
+    }
+    headers = {
+        **slack_api_headers(route["bot_token"]),
+        "Content-Type": "application/json; charset=utf-8",
+    }
+
+    for attempt in range(1, SLACK_POST_MAX_ATTEMPTS + 1):
+        response = requests.post(
+            "https://slack.com/api/chat.postMessage",
+            json=request_payload,
+            headers=headers,
+            timeout=15,
+        )
+        response.raise_for_status()
+        response_payload = response.json()
+        if response_payload.get("ok"):
+            return response
+
         response_metadata = response_payload.get("response_metadata") or {}
         detail_messages = response_metadata.get("messages") or []
         detail_suffix = f" details={detail_messages}" if detail_messages else ""
-        raise requests.exceptions.RequestException(
-            f"Slack chat.postMessage failed: {response_payload.get('error', 'unknown_error')}{detail_suffix}"
+        error_message = response_payload.get("error", "unknown_error")
+        invalid_slack_file = (
+            error_message == "invalid_blocks"
+            and any("invalid slack file" in message.lower() for message in detail_messages)
         )
-    return response
+
+        if invalid_slack_file and attempt < SLACK_POST_MAX_ATTEMPTS:
+            logger.warning(
+                "Slack file block not ready yet; retrying chat.postMessage attempt=%d/%d delay=%.1fs",
+                attempt,
+                SLACK_POST_MAX_ATTEMPTS,
+                SLACK_POST_RETRY_DELAY_SECONDS,
+            )
+            time.sleep(SLACK_POST_RETRY_DELAY_SECONDS)
+            continue
+
+        raise requests.exceptions.RequestException(
+            f"Slack chat.postMessage failed: {error_message}{detail_suffix}"
+        )
 
 
 def slack_api_headers(bot_token):
