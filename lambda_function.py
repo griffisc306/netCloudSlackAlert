@@ -331,7 +331,9 @@ def append_uploaded_images_to_payload(payload, uploaded_images):
             "alt_text": image["filename"],
         }
 
-        if image.get("slack_file_id"):
+        if image.get("slack_file_url"):
+            block["slack_file"] = {"url": image["slack_file_url"]}
+        elif image.get("slack_file_id"):
             block["slack_file"] = {"id": image["slack_file_id"]}
         else:
             block["image_url"] = image["url"]
@@ -574,10 +576,20 @@ def upload_image_to_slack(bot_token, image):
             f"Slack file upload complete failed: {complete_payload.get('error', 'unknown_error')}"
         )
 
+    file_info = None
+    files = complete_payload.get("files")
+    if isinstance(files, list) and files:
+        file_info = files[0]
+
+    slack_file_url = None
+    if isinstance(file_info, dict):
+        slack_file_url = file_info.get("url_private") or file_info.get("permalink")
+
     return {
         "filename": image["filename"],
         "content_type": image["content_type"],
         "slack_file_id": file_id,
+        "slack_file_url": slack_file_url,
     }
 
 
