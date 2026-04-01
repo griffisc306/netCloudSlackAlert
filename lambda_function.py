@@ -301,10 +301,6 @@ def append_uploaded_images_to_payload(payload, uploaded_images):
         block = {
             "type": "image",
             "alt_text": image["filename"],
-            "title": {
-                "type": "plain_text",
-                "text": image["filename"]
-            }
         }
 
         if image.get("slack_file_id"):
