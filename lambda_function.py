@@ -396,15 +396,6 @@ def count_slack_file_blocks(payload):
     )
 
 
-def count_image_url_blocks(payload):
-    blocks = payload.get("blocks") or []
-    return sum(
-        1
-        for block in blocks
-        if block.get("type") == "image" and block.get("image_url")
-    )
-
-
 def build_slack_payload_from_json(body):
     source = normalize_source(body.get("source"))
     route = with_channel_override(
@@ -442,15 +433,6 @@ def build_slack_payload_from_json(body):
 
     message_images = prepare_message_images(route, uploaded_images, source)
     append_uploaded_images_to_payload(payload, message_images)
-    logger.info(
-        "Built JSON Slack payload source=%s has_chart_image=%s has_image_url=%s image_blocks=%d slack_file_blocks=%d image_url_blocks=%d",
-        source,
-        bool(body.get("chart_image_base64_png")),
-        bool(body.get("image_url")),
-        len([block for block in payload.get("blocks", []) if block.get("type") == "image"]),
-        count_slack_file_blocks(payload),
-        count_image_url_blocks(payload),
-    )
 
     return route, payload, uploaded_images
 
@@ -529,14 +511,6 @@ def build_slack_payload_from_multipart(fields, files):
     payload = build_basic_slack_payload(title, timestamp, message, message)
     message_images = prepare_message_images(route, uploaded_images, source)
     append_uploaded_images_to_payload(payload, message_images)
-    logger.info(
-        "Built multipart Slack payload source=%s file_count=%d image_blocks=%d slack_file_blocks=%d image_url_blocks=%d",
-        source,
-        len(uploaded_images),
-        len([block for block in payload.get("blocks", []) if block.get("type") == "image"]),
-        count_slack_file_blocks(payload),
-        count_image_url_blocks(payload),
-    )
 
     return route, payload, uploaded_images
 
@@ -690,39 +664,27 @@ def send_slack_message(route, payload):
 
 def lambda_handler(event, context):
     try:
-        logger.info("Raw event: %s", json.dumps(event))
-
         content_type = get_header(event, "Content-Type") or ""
+        logger.info("Handling webhook request content_type=%s", content_type)
 
         if "multipart/form-data" in content_type.lower():
             fields, files = parse_multipart_form(event)
-            logger.info("Parsed multipart fields: %s", json.dumps(fields))
-            logger.info("Parsed multipart file count: %d", len(files))
-            route, payload, uploaded_images = build_slack_payload_from_multipart(fields, files)
+            route, payload, _ = build_slack_payload_from_multipart(fields, files)
 
         elif "application/json" in content_type.lower():
             body = parse_json_body(event)
-            logger.info("Parsed JSON body: %s", json.dumps(body))
 
             if isinstance(body.get("data"), list) and body["data"]:
-                route, payload, uploaded_images = build_slack_payload_from_cradlepoint_item(
+                route, payload, _ = build_slack_payload_from_cradlepoint_item(
                     body["data"][0],
                     body.get("slack_channel_id_override"),
                 )
             else:
-                route, payload, uploaded_images = build_slack_payload_from_json(body)
+                route, payload, _ = build_slack_payload_from_json(body)
 
         else:
             raise ValueError(f"Unsupported Content-Type: {content_type}")
 
-        logger.info(
-            "Sending Slack message source_route=%s content_type=%s image_blocks=%d slack_file_blocks=%d image_url_blocks=%d",
-            "cam_mon" if route.get("bot_token") else "cradlepoint",
-            content_type,
-            len([block for block in payload.get("blocks", []) if block.get("type") == "image"]),
-            count_slack_file_blocks(payload),
-            count_image_url_blocks(payload),
-        )
         slack_response = send_slack_message(route, payload)
         slack_file_uploads = count_slack_file_blocks(payload)
 
