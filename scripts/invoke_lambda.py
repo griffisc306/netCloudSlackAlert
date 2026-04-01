@@ -14,17 +14,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 class DummyResponse:
-    status_code = 200
-
-    def raise_for_status(self):
-        return None
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {"ok": True}
 
     def json(self):
-        return {
-            "ok": True,
-            "upload_url": "https://example.com/slack-upload",
-            "file_id": "F123456",
-        }
+        return self._payload
 
 
 class DummyS3Client:
@@ -33,6 +28,35 @@ class DummyS3Client:
 
     def generate_presigned_url(self, **kwargs):
         return "https://example.com/test-image"
+
+
+def fake_http_post_json(url, payload, headers=None, timeout=15):
+    if "chat.postMessage" in url:
+        return DummyResponse(200, {"ok": True, "ts": "12345.6789"})
+    return DummyResponse(200, {"ok": True})
+
+
+def fake_http_post_form(url, form_data, headers=None, timeout=15):
+    if "files.getUploadURLExternal" in url:
+        return DummyResponse(200, {
+            "ok": True,
+            "upload_url": "https://example.com/slack-upload",
+            "file_id": "F123456",
+        })
+    if "files.completeUploadExternal" in url:
+        return DummyResponse(200, {
+            "ok": True,
+            "files": [{
+                "id": "F123456",
+                "url_private": "https://files.slack.com/files-pri/T123-F123456/test.png",
+                "permalink": "https://slack-files.com/T123-F123456-test",
+            }],
+        })
+    return DummyResponse(200, {"ok": True})
+
+
+def fake_http_post_bytes(url, content, content_type, timeout=30):
+    return DummyResponse(200, {"ok": True})
 
 
 def main():
@@ -79,10 +103,10 @@ def main():
 
     with ExitStack() as stack:
         if not args.allow_network:
-            stack.enter_context(
-                mock.patch.object(lambda_module.requests, "post", return_value=DummyResponse())
-            )
             stack.enter_context(mock.patch.object(lambda_module, "s3", DummyS3Client()))
+            stack.enter_context(mock.patch.object(lambda_module, "http_post_json", side_effect=fake_http_post_json))
+            stack.enter_context(mock.patch.object(lambda_module, "http_post_form", side_effect=fake_http_post_form))
+            stack.enter_context(mock.patch.object(lambda_module, "http_post_bytes", side_effect=fake_http_post_bytes))
 
         result = lambda_module.lambda_handler(event, None)
 

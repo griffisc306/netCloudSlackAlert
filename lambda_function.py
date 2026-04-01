@@ -4,10 +4,10 @@ import time
 import uuid
 import re
 import boto3 # pyright: ignore[reportMissingImports]
-import requests # type: ignore
 import logging
 import base64
 from datetime import datetime
+from urllib import error, parse, request
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -28,6 +28,21 @@ PRESIGNED_URL_EXPIRES = int(os.environ.get("PRESIGNED_URL_EXPIRES", "3600"))
 HEADERS = {"Content-Type": "application/json"}
 SLACK_POST_RETRY_DELAY_SECONDS = float(os.environ.get("SLACK_POST_RETRY_DELAY_SECONDS", "1.0"))
 SLACK_POST_MAX_ATTEMPTS = int(os.environ.get("SLACK_POST_MAX_ATTEMPTS", "3"))
+DEFAULT_HTTP_TIMEOUT_SECONDS = 15
+UPLOAD_HTTP_TIMEOUT_SECONDS = 30
+
+
+class HTTPRequestError(Exception):
+    pass
+
+
+class HTTPResponse:
+    def __init__(self, status_code, body):
+        self.status_code = status_code
+        self.text = body.decode("utf-8", errors="replace")
+
+    def json(self):
+        return json.loads(self.text)
 
 
 def format_time_to_eastern(dt_str=None):
@@ -216,6 +231,35 @@ def build_basic_slack_payload(title, timestamp, message, fallback_text):
             }
         ]
     }
+
+
+def http_post(url, *, headers=None, data=None, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS):
+    req = request.Request(url, data=data, headers=headers or {}, method="POST")
+    try:
+        with request.urlopen(req, timeout=timeout) as response:
+            return HTTPResponse(response.getcode(), response.read())
+    except error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise HTTPRequestError(f"HTTP {exc.code} from {url}: {body}") from exc
+    except error.URLError as exc:
+        raise HTTPRequestError(f"Request failed for {url}: {exc.reason}") from exc
+
+
+def http_post_json(url, payload, headers=None, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS):
+    request_headers = {"Content-Type": "application/json", **(headers or {})}
+    data = json.dumps(payload).encode("utf-8")
+    return http_post(url, headers=request_headers, data=data, timeout=timeout)
+
+
+def http_post_form(url, form_data, headers=None, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS):
+    request_headers = {"Content-Type": "application/x-www-form-urlencoded", **(headers or {})}
+    data = parse.urlencode(form_data).encode("utf-8")
+    return http_post(url, headers=request_headers, data=data, timeout=timeout)
+
+
+def http_post_bytes(url, content, content_type, timeout=UPLOAD_HTTP_TIMEOUT_SECONDS):
+    request_headers = {"Content-Type": content_type}
+    return http_post(url, headers=request_headers, data=content, timeout=timeout)
 
 
 def upload_image_to_s3(file_obj, source):
@@ -472,14 +516,12 @@ def build_slack_payload_from_multipart(fields, files):
 
 
 def post_to_slack(webhook_url, payload):
-    response = requests.post(
+    return http_post_json(
         webhook_url,
-        json=payload,
+        payload,
         headers=HEADERS,
-        timeout=15
+        timeout=DEFAULT_HTTP_TIMEOUT_SECONDS,
     )
-    response.raise_for_status()
-    return response
 
 
 def post_message_to_slack(route, payload):
@@ -493,13 +535,12 @@ def post_message_to_slack(route, payload):
     }
 
     for attempt in range(1, SLACK_POST_MAX_ATTEMPTS + 1):
-        response = requests.post(
+        response = http_post_json(
             "https://slack.com/api/chat.postMessage",
-            json=request_payload,
+            request_payload,
             headers=headers,
-            timeout=15,
+            timeout=DEFAULT_HTTP_TIMEOUT_SECONDS,
         )
-        response.raise_for_status()
         response_payload = response.json()
         if response_payload.get("ok"):
             return response
@@ -523,7 +564,7 @@ def post_message_to_slack(route, payload):
             time.sleep(SLACK_POST_RETRY_DELAY_SECONDS)
             continue
 
-        raise requests.exceptions.RequestException(
+        raise HTTPRequestError(
             f"Slack chat.postMessage failed: {error_message}{detail_suffix}"
         )
 
@@ -535,30 +576,27 @@ def slack_api_headers(bot_token):
 
 
 def post_file_to_upload_url(upload_url, image):
-    response = requests.post(
+    return http_post_bytes(
         upload_url,
-        data=image["content"],
-        headers={"Content-Type": image["content_type"]},
-        timeout=30,
+        image["content"],
+        image["content_type"],
+        timeout=UPLOAD_HTTP_TIMEOUT_SECONDS,
     )
-    response.raise_for_status()
-    return response
 
 
 def upload_image_to_slack(bot_token, image):
-    metadata_response = requests.post(
+    metadata_response = http_post_form(
         "https://slack.com/api/files.getUploadURLExternal",
-        data={
+        {
             "filename": image["filename"],
             "length": len(image["content"]),
         },
         headers=slack_api_headers(bot_token),
-        timeout=15,
+        timeout=DEFAULT_HTTP_TIMEOUT_SECONDS,
     )
-    metadata_response.raise_for_status()
     metadata = metadata_response.json()
     if not metadata.get("ok"):
-        raise requests.exceptions.RequestException(
+        raise HTTPRequestError(
             f"Slack file upload init failed: {metadata.get('error', 'unknown_error')}"
         )
 
@@ -567,21 +605,20 @@ def upload_image_to_slack(bot_token, image):
 
     post_file_to_upload_url(upload_url, image)
 
-    complete_response = requests.post(
+    complete_response = http_post_form(
         "https://slack.com/api/files.completeUploadExternal",
-        data={
+        {
             "files": json.dumps([{
                 "id": file_id,
                 "title": image["filename"],
             }]),
         },
         headers=slack_api_headers(bot_token),
-        timeout=15,
+        timeout=DEFAULT_HTTP_TIMEOUT_SECONDS,
     )
-    complete_response.raise_for_status()
     complete_payload = complete_response.json()
     if not complete_payload.get("ok"):
-        raise requests.exceptions.RequestException(
+        raise HTTPRequestError(
             f"Slack file upload complete failed: {complete_payload.get('error', 'unknown_error')}"
         )
 
@@ -664,7 +701,7 @@ def lambda_handler(event, context):
             })
         }
 
-    except requests.exceptions.RequestException as e:
+    except HTTPRequestError as e:
         logger.exception("Slack request failed")
         return {
             "statusCode": 502,
