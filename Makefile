@@ -2,7 +2,7 @@ PYTHON ?= python3
 EVENT ?= events/console-test-event.json
 LIVE_URL ?= https://khgcza01c8.execute-api.us-east-1.amazonaws.com/Prod/webhook
 LIVE_PAYLOAD ?= /tmp/netcloud-live-payload.json
-LIVE_CHANNEL_ID ?=
+LIVE_CHANNEL_ID ?= C0AQ76M4TT7
 
 .PHONY: install-dev test live-send
 install-dev:
