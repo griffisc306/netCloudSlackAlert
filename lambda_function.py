@@ -220,6 +220,14 @@ def upload_image_to_s3(file_obj, source):
     filename = file_obj["filename"].replace("/", "_")
     key = f"webhook-images/{source}/{int(time.time())}-{uuid.uuid4().hex}-{filename}"
 
+    logger.info(
+        "Uploading image to S3 bucket=%s key=%s content_type=%s bytes=%d",
+        S3_BUCKET_NAME,
+        key,
+        file_obj["content_type"],
+        len(file_obj["content"]),
+    )
+
     s3.put_object(
         Bucket=S3_BUCKET_NAME,
         Key=key,
@@ -231,6 +239,14 @@ def upload_image_to_s3(file_obj, source):
         ClientMethod="get_object",
         Params={"Bucket": S3_BUCKET_NAME, "Key": key},
         ExpiresIn=PRESIGNED_URL_EXPIRES,
+    )
+
+    logger.info(
+        "Generated presigned image URL for Slack bucket=%s key=%s expires=%d url=%s",
+        S3_BUCKET_NAME,
+        key,
+        PRESIGNED_URL_EXPIRES,
+        url,
     )
 
     return {
