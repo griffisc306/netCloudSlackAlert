@@ -396,6 +396,15 @@ def count_slack_file_blocks(payload):
     )
 
 
+def count_image_url_blocks(payload):
+    blocks = payload.get("blocks") or []
+    return sum(
+        1
+        for block in blocks
+        if block.get("type") == "image" and block.get("image_url")
+    )
+
+
 def build_slack_payload_from_json(body):
     source = normalize_source(body.get("source"))
     route = with_channel_override(
@@ -433,6 +442,15 @@ def build_slack_payload_from_json(body):
 
     message_images = prepare_message_images(route, uploaded_images, source)
     append_uploaded_images_to_payload(payload, message_images)
+    logger.info(
+        "Built JSON Slack payload source=%s has_chart_image=%s has_image_url=%s image_blocks=%d slack_file_blocks=%d image_url_blocks=%d",
+        source,
+        bool(body.get("chart_image_base64_png")),
+        bool(body.get("image_url")),
+        len([block for block in payload.get("blocks", []) if block.get("type") == "image"]),
+        count_slack_file_blocks(payload),
+        count_image_url_blocks(payload),
+    )
 
     return route, payload, uploaded_images
 
@@ -511,6 +529,14 @@ def build_slack_payload_from_multipart(fields, files):
     payload = build_basic_slack_payload(title, timestamp, message, message)
     message_images = prepare_message_images(route, uploaded_images, source)
     append_uploaded_images_to_payload(payload, message_images)
+    logger.info(
+        "Built multipart Slack payload source=%s file_count=%d image_blocks=%d slack_file_blocks=%d image_url_blocks=%d",
+        source,
+        len(uploaded_images),
+        len([block for block in payload.get("blocks", []) if block.get("type") == "image"]),
+        count_slack_file_blocks(payload),
+        count_image_url_blocks(payload),
+    )
 
     return route, payload, uploaded_images
 
@@ -689,6 +715,14 @@ def lambda_handler(event, context):
         else:
             raise ValueError(f"Unsupported Content-Type: {content_type}")
 
+        logger.info(
+            "Sending Slack message source_route=%s content_type=%s image_blocks=%d slack_file_blocks=%d image_url_blocks=%d",
+            "cam_mon" if route.get("bot_token") else "cradlepoint",
+            content_type,
+            len([block for block in payload.get("blocks", []) if block.get("type") == "image"]),
+            count_slack_file_blocks(payload),
+            count_image_url_blocks(payload),
+        )
         slack_response = send_slack_message(route, payload)
         slack_file_uploads = count_slack_file_blocks(payload)
 
