@@ -352,10 +352,7 @@ def build_slack_payload_from_json(body):
             "url": image_url,
         })
 
-    if route_supports_direct_slack_upload(route):
-        webhook_images = [image for image in uploaded_images if image.get("url")]
-    else:
-        webhook_images = prepare_webhook_images(uploaded_images, source)
+    webhook_images = prepare_webhook_images(uploaded_images, source)
 
     append_uploaded_images_to_payload(payload, webhook_images)
 
@@ -434,10 +431,7 @@ def build_slack_payload_from_multipart(fields, files):
     )
 
     payload = build_basic_slack_payload(title, timestamp, message, message)
-    if route_supports_direct_slack_upload(route):
-        webhook_images = [image for image in uploaded_images if image.get("url")]
-    else:
-        webhook_images = prepare_webhook_images(uploaded_images, source)
+    webhook_images = prepare_webhook_images(uploaded_images, source)
 
     append_uploaded_images_to_payload(payload, webhook_images)
 
@@ -592,8 +586,7 @@ def lambda_handler(event, context):
         else:
             raise ValueError(f"Unsupported Content-Type: {content_type}")
 
-        uploaded_slack_images = upload_images_to_slack(route, uploaded_images)
-        append_uploaded_images_to_payload(payload, uploaded_slack_images)
+        uploaded_slack_images = []
         slack_response = send_slack_message(route, payload)
 
         return {
