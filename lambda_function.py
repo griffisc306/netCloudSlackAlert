@@ -665,6 +665,8 @@ def send_slack_message(route, payload):
 
 def lambda_handler(event, context):
     try:
+        logger.info("Raw event: %s", json.dumps(event, default=str))
+
         content_type = get_header(event, "Content-Type") or ""
         logger.info("Handling webhook request content_type=%s", content_type)
 
