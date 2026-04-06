@@ -30,6 +30,30 @@ class DummyS3Client:
         return "https://example.com/test-image"
 
 
+class DummyDynamoDBClient:
+    def __init__(self):
+        self.items = []
+
+    def put_item(self, **kwargs):
+        item = kwargs.get("Item") or {}
+        self.items.append(item)
+        return {}
+
+    def query(self, **kwargs):
+        return {"Items": []}
+
+    def batch_write_item(self, **kwargs):
+        return {"UnprocessedItems": {}}
+
+
+def fake_boto3_client(service_name, *args, **kwargs):
+    if service_name == "s3":
+        return DummyS3Client()
+    if service_name == "dynamodb":
+        return DummyDynamoDBClient()
+    raise ValueError(f"Unsupported mocked boto3 client: {service_name}")
+
+
 def fake_http_post_json(url, payload, headers=None, timeout=15):
     if "chat.postMessage" in url:
         return DummyResponse(200, {"ok": True, "ts": "12345.6789"})
@@ -98,7 +122,7 @@ def main():
         parsed_body["slack_channel_id_override"] = args.channel_id
         event["body"] = json.dumps(parsed_body)
 
-    with mock.patch("boto3.client", return_value=DummyS3Client()):
+    with mock.patch("boto3.client", side_effect=fake_boto3_client):
         lambda_module = importlib.import_module("lambda_function")
 
     with ExitStack() as stack:

@@ -3,10 +3,12 @@ import json
 import time
 import uuid
 import re
+from collections import defaultdict
 import boto3 # pyright: ignore[reportMissingImports]
 import logging
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from boto3.dynamodb.types import TypeDeserializer, TypeSerializer # pyright: ignore[reportMissingImports]
 from urllib import error, parse, request
 try:
     from zoneinfo import ZoneInfo
@@ -17,6 +19,9 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 s3 = boto3.client("s3")
+dynamodb = boto3.client("dynamodb")
+ddb_serializer = TypeSerializer()
+ddb_deserializer = TypeDeserializer()
 
 SLACK_URL_CRADLEPOINT = os.environ["SLACK_URL_CRADLEPOINT"]
 SLACK_URL_CRADLEPOINT_TEST = os.environ.get("SLACK_URL_CRADLEPOINT_TEST")
@@ -25,6 +30,9 @@ SLACK_BOT_TOKEN_CAM_MON = os.environ.get("SLACK_BOT_TOKEN_CAM_MON")
 SLACK_CHANNEL_ID_CAM_MON = os.environ.get("SLACK_CHANNEL_ID_CAM_MON")
 S3_BUCKET_NAME = os.environ["S3_BUCKET_NAME"]
 PRESIGNED_URL_EXPIRES = int(os.environ.get("PRESIGNED_URL_EXPIRES", "3600"))
+DYNAMODB_ALERT_TABLE = os.environ.get("DYNAMODB_ALERT_TABLE", "netCloudSlackAlertEvents")
+DYNAMODB_ALERT_GSI_NAME = os.environ.get("DYNAMODB_ALERT_GSI_NAME", "gsi1")
+ALERT_RETENTION_DAYS = int(os.environ.get("ALERT_RETENTION_DAYS", "30"))
 
 HEADERS = {"Content-Type": "application/json"}
 SLACK_POST_RETRY_DELAY_SECONDS = float(os.environ.get("SLACK_POST_RETRY_DELAY_SECONDS", "1.5"))
@@ -46,14 +54,32 @@ class HTTPResponse:
         return json.loads(self.text)
 
 
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def parse_iso_datetime(dt_str=None):
+    if not dt_str:
+        return utc_now()
+
+    try:
+        parsed = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return utc_now()
+
+
+def format_time_to_utc(dt_str=None):
+    return parse_iso_datetime(dt_str).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
 def format_time_to_eastern(dt_str=None):
     try:
-        if dt_str:
-            dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-        else:
-            dt = datetime.now(tz=ZoneInfo("UTC"))
+        dt = parse_iso_datetime(dt_str)
     except Exception:
-        dt = datetime.now(tz=ZoneInfo("UTC"))
+        dt = utc_now()
 
     eastern = ZoneInfo("America/New_York")
     return dt.astimezone(eastern).strftime("%m/%d/%Y %I:%M %p")
@@ -193,6 +219,16 @@ def is_test_cradlepoint_route(event):
     return path.endswith("/test") or "cradlepoint-test" in path
 
 
+def get_route_key(source, event=None):
+    if source == "cradlepoint":
+        return "test" if is_test_cradlepoint_route(event) else "prod"
+    return "default"
+
+
+def build_summary_bucket(source, route_key):
+    return f"SOURCE#{source}#ROUTE#{route_key}"
+
+
 def select_slack_route(source, event=None):
     route_map = {
         "cradlepoint": {
@@ -231,6 +267,469 @@ def resolve_alert_title(source, title=None, default_title="Alert"):
         return (title or "").strip() or "Camera Alert"
 
     return default_title
+
+
+def is_scheduled_event(event):
+    if not isinstance(event, dict):
+        return False
+
+    return (
+        event.get("source") == "aws.events"
+        or event.get("detail-type") == "Scheduled Event"
+    )
+
+
+def sanitize_payload_for_storage(payload):
+    if isinstance(payload, dict):
+        sanitized = {}
+        for key, value in payload.items():
+            if key == "chart_image_base64_png":
+                sanitized[key] = "[omitted]"
+            else:
+                sanitized[key] = sanitize_payload_for_storage(value)
+        return sanitized
+
+    if isinstance(payload, list):
+        return [sanitize_payload_for_storage(item) for item in payload]
+
+    if isinstance(payload, bytes):
+        return "[binary omitted]"
+
+    return payload
+
+
+def serialize_ddb_item(item):
+    return {
+        key: ddb_serializer.serialize(value)
+        for key, value in item.items()
+        if value is not None
+    }
+
+
+def deserialize_ddb_item(item):
+    return {
+        key: ddb_deserializer.deserialize(value)
+        for key, value in item.items()
+    }
+
+
+def normalize_string(value, default="Unknown"):
+    text = str(value).strip() if value is not None else ""
+    return text or default
+
+
+def build_cradlepoint_storage_record(item, event):
+    source = "cradlepoint"
+    route_key = get_route_key(source, event)
+    detected_at = item.get("detected_at") or item.get("created_at")
+
+    router_details = item.get("router_details") or {}
+    info = item.get("info") or {}
+
+    message = (
+        info.get("message")
+        if isinstance(info, dict) and info.get("message")
+        else item.get("friendly_info") or "[No message supplied]"
+    )
+
+    device_name = (
+        router_details.get("name")
+        or item.get("device_name")
+        or item.get("router_name")
+        or "Unknown"
+    )
+    device_mac = (
+        router_details.get("mac")
+        or item.get("mac")
+        or item.get("device_mac")
+        or "Unknown"
+    )
+
+    return {
+        "source": source,
+        "route_key": route_key,
+        "account_name": normalize_string(item.get("account_name") or item.get("account"), "Cradlepoint"),
+        "alert_name": normalize_string(item.get("alert_type") or item.get("type"), "Unknown"),
+        "device_name": normalize_string(device_name),
+        "device_mac": normalize_string(device_mac),
+        "status": normalize_string(message, "[No message supplied]"),
+        "detected_at": parse_iso_datetime(detected_at).isoformat(),
+        "display_timestamp": format_time_to_eastern(detected_at),
+        "raw_payload": sanitize_payload_for_storage(item),
+    }
+
+
+def build_camera_storage_record(body, event=None, fields=None, files=None):
+    payload = body if body is not None else fields or {}
+    source = "umci camera monitor"
+    route_key = get_route_key(source, event)
+    timestamp = payload.get("timestamp")
+
+    file_count = 0
+    if files:
+        file_count = sum(1 for file_item in files if file_item.get("field_name") == "images")
+
+    raw_payload = sanitize_payload_for_storage(payload)
+    if files:
+        raw_payload = {
+            **raw_payload,
+            "files": [
+                {
+                    "field_name": file_item.get("field_name"),
+                    "filename": file_item.get("filename"),
+                    "content_type": file_item.get("content_type"),
+                }
+                for file_item in files
+            ],
+        }
+
+    return {
+        "source": source,
+        "route_key": route_key,
+        "account_name": "UMCI Camera Monitor",
+        "alert_name": normalize_string(
+            payload.get("title") or payload.get("event") or "Camera Alert",
+            "Camera Alert",
+        ),
+        "device_name": normalize_string(payload.get("device_name"), "UMCI Camera Monitor"),
+        "device_mac": normalize_string(payload.get("device_mac")),
+        "status": normalize_string(payload.get("text") or payload.get("message"), "[No message supplied]"),
+        "detected_at": parse_iso_datetime(timestamp).isoformat(),
+        "display_timestamp": format_time_to_eastern(timestamp),
+        "file_count": file_count,
+        "raw_payload": raw_payload,
+    }
+
+
+def persist_alert_records(records):
+    stored = 0
+
+    for record in records:
+        detected_dt = parse_iso_datetime(record.get("detected_at"))
+        expires_at = int((detected_dt + timedelta(days=ALERT_RETENTION_DAYS)).timestamp())
+        item = {
+            "pk": f"ALERT#{record['source']}#{record['route_key']}",
+            "sk": f"{detected_dt.isoformat()}#{uuid.uuid4().hex}",
+            "gsi1pk": build_summary_bucket(record["source"], record["route_key"]),
+            "gsi1sk": detected_dt.isoformat(),
+            "source": record["source"],
+            "route_key": record["route_key"],
+            "account_name": record.get("account_name") or "Unknown",
+            "alert_name": record.get("alert_name") or "Unknown",
+            "device_name": record.get("device_name") or "Unknown",
+            "device_mac": record.get("device_mac") or "Unknown",
+            "status": record.get("status") or "[No message supplied]",
+            "display_timestamp": record.get("display_timestamp") or format_time_to_eastern(detected_dt.isoformat()),
+            "detected_at": detected_dt.isoformat(),
+            "raw_payload_json": json.dumps(record.get("raw_payload") or {}, default=str),
+            "expires_at": expires_at,
+        }
+
+        if record.get("file_count") is not None:
+            item["file_count"] = int(record["file_count"])
+
+        dynamodb.put_item(
+            TableName=DYNAMODB_ALERT_TABLE,
+            Item=serialize_ddb_item(item),
+        )
+        stored += 1
+
+    return stored
+
+
+def query_summary_records(source, route_key, start_dt, end_dt):
+    response = dynamodb.query(
+        TableName=DYNAMODB_ALERT_TABLE,
+        IndexName=DYNAMODB_ALERT_GSI_NAME,
+        KeyConditionExpression="gsi1pk = :bucket AND gsi1sk BETWEEN :start AND :end",
+        ExpressionAttributeValues=serialize_ddb_item({
+            ":bucket": build_summary_bucket(source, route_key),
+            ":start": start_dt.isoformat(),
+            ":end": end_dt.isoformat(),
+        }),
+    )
+
+    return [deserialize_ddb_item(item) for item in response.get("Items", [])]
+
+
+def delete_alert_records(records):
+    if not records:
+        return 0
+
+    deleted = 0
+    batches = []
+
+    for record in records:
+        pk = record.get("pk")
+        sk = record.get("sk")
+        if not pk or not sk:
+            continue
+
+        batches.append({
+            "DeleteRequest": {
+                "Key": serialize_ddb_item({
+                    "pk": pk,
+                    "sk": sk,
+                })
+            }
+        })
+
+    for index in range(0, len(batches), 25):
+        request_items = {
+            DYNAMODB_ALERT_TABLE: batches[index:index + 25]
+        }
+        response = dynamodb.batch_write_item(RequestItems=request_items)
+        unprocessed = response.get("UnprocessedItems", {})
+        deleted += len(request_items[DYNAMODB_ALERT_TABLE]) - len(unprocessed.get(DYNAMODB_ALERT_TABLE, []))
+
+    return deleted
+
+
+def summarize_records_by_alert(records):
+    grouped = defaultdict(lambda: {"count": 0, "devices": set()})
+
+    for record in records:
+        key = record.get("alert_name") or "Unknown"
+        grouped[key]["count"] += 1
+        device_identifier = record.get("device_mac") or record.get("device_name") or "Unknown"
+        grouped[key]["devices"].add(device_identifier)
+
+    rows = []
+    for alert_name in sorted(grouped):
+        summary = grouped[alert_name]
+        rows.append({
+            "alert_name": alert_name,
+            "alert_count": str(summary["count"]),
+            "affected_devices": str(len(summary["devices"])),
+        })
+
+    return rows
+
+
+def truncate_text(value, max_length):
+    value = value or ""
+    if len(value) <= max_length:
+        return value
+    return value[: max_length - 3] + "..."
+
+
+def titleize_alert_name(value):
+    value = normalize_string(value)
+    return value.replace("_", " ").title()
+
+
+def format_table(headers, rows):
+    if not rows:
+        return "_No alerts in this window_"
+
+    widths = [len(header) for header in headers]
+    normalized_rows = []
+
+    for row in rows:
+        normalized = [str(cell) for cell in row]
+        normalized_rows.append(normalized)
+        for index, cell in enumerate(normalized):
+            widths[index] = max(widths[index], len(cell))
+
+    def format_row(row):
+        return " | ".join(cell.ljust(widths[index]) for index, cell in enumerate(row))
+
+    divider = "-+-".join("-" * width for width in widths)
+    table_lines = [format_row(headers), divider]
+    table_lines.extend(format_row(row) for row in normalized_rows)
+    return "```" + "\n".join(table_lines) + "```"
+
+
+def summarize_record_details(records, limit=15):
+    sorted_records = sorted(records, key=lambda record: record.get("detected_at", ""))
+    rows = []
+
+    for record in sorted_records[:limit]:
+        rows.append([
+            titleize_alert_name(record.get("alert_name", "Unknown")),
+            truncate_text(record.get("device_mac", "Unknown"), 17),
+            truncate_text(record.get("device_name", "Unknown"), 18),
+            truncate_text(record.get("status", "[No message supplied]"), 48),
+            truncate_text(record.get("display_timestamp", ""), 22),
+        ])
+
+    remaining = len(sorted_records) - limit
+    table = format_table(
+        ["Alert Name", "MAC Address", "Device Name", "Status", "Timestamp"],
+        rows,
+    )
+
+    if remaining > 0:
+        return table + f"\n_...and {remaining} more alerts_"
+
+    return table
+
+
+def select_summary_route(source, route_key):
+    if source == "cradlepoint":
+        return {
+            "webhook_url": (
+                SLACK_URL_CRADLEPOINT_TEST
+                if route_key == "test" and SLACK_URL_CRADLEPOINT_TEST
+                else SLACK_URL_CRADLEPOINT
+            ),
+            "bot_token": None,
+            "channel_id": None,
+        }
+
+    return select_slack_route(source)
+
+
+def build_hourly_summary_payload(source, route_key, records, start_dt, end_dt):
+    source_label = "Cradlepoint" if source == "cradlepoint" else "UMCI Camera Monitor"
+    route_label = route_key.upper()
+    account_name = records[0].get("account_name") if records else source_label
+    category_rows = summarize_records_by_alert(records)
+    details = summarize_record_details(records)
+    categories = format_table(
+        ["Alert Name", "Alert Count", "Affected Devices"],
+        [
+            [
+                titleize_alert_name(row["alert_name"]),
+                row["alert_count"],
+                row["affected_devices"],
+            ]
+            for row in category_rows
+        ],
+    )
+
+    return {
+        "text": f"{source_label} hourly alert summary ({route_label})",
+        "blocks": [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"{source_label} Alert Summary",
+                    "emoji": True,
+                }
+            },
+            {
+                "type": "divider",
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Route:* {route_label}",
+                    }
+                ]
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Account Name*\n{account_name}",
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Total Alerts*\n{len(records)}",
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Start Time*\n{format_time_to_utc(start_dt.isoformat())}",
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*End Time*\n{format_time_to_utc(end_dt.isoformat())}",
+                    },
+                ],
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Alert Categories*",
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": categories,
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Alert Details*",
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": details,
+                }
+            }
+        ]
+    }
+
+
+def build_webhook_storage_records(event, body=None, fields=None, files=None):
+    if body is not None and isinstance(body.get("data"), list) and body["data"]:
+        return [
+            build_cradlepoint_storage_record(item, event)
+            for item in body["data"]
+        ]
+
+    if body is not None:
+        return [build_camera_storage_record(body, event=event)]
+
+    return [build_camera_storage_record(None, event=event, fields=fields, files=files)]
+
+
+def iter_summary_targets():
+    if SLACK_URL_CRADLEPOINT:
+        yield "cradlepoint", "prod"
+
+    if SLACK_URL_CRADLEPOINT_TEST:
+        yield "cradlepoint", "test"
+
+
+def send_hourly_summaries(event):
+    event_time = parse_iso_datetime(event.get("time"))
+    window_end = event_time.replace(minute=0, second=0, microsecond=0)
+    window_start = window_end - timedelta(hours=1)
+    summaries_sent = 0
+    summary_counts = []
+    deleted_alerts = 0
+
+    for source, route_key in iter_summary_targets():
+        records = query_summary_records(source, route_key, window_start, window_end)
+        if not records:
+            continue
+
+        route = select_summary_route(source, route_key)
+        payload = build_hourly_summary_payload(source, route_key, records, window_start, window_end)
+        send_slack_message(route, payload)
+        deleted_alerts += delete_alert_records(records)
+        summaries_sent += 1
+        summary_counts.append({
+            "source": source,
+            "route_key": route_key,
+            "alert_count": len(records),
+        })
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "message": "Hourly summaries processed successfully",
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "summaries_sent": summaries_sent,
+            "deleted_alerts": deleted_alerts,
+            "summary_counts": summary_counts,
+        })
+    }
 
 
 def build_basic_slack_payload(title, timestamp, message, fallback_text):
@@ -699,39 +1198,69 @@ def lambda_handler(event, context):
     try:
         logger.info("Raw event: %s", json.dumps(event, default=str))
 
+        if is_scheduled_event(event):
+            return send_hourly_summaries(event)
+
         content_type = get_header(event, "Content-Type") or ""
         logger.info("Handling webhook request content_type=%s", content_type)
 
         if "multipart/form-data" in content_type.lower():
             fields, files = parse_multipart_form(event)
+            source = normalize_source(fields.get("source"))
+
+            if source == "cradlepoint":
+                records = build_webhook_storage_records(event, fields=fields, files=files)
+                stored_alerts = persist_alert_records(records)
+                return {
+                    "statusCode": 200,
+                    "body": json.dumps({
+                        "message": "Webhook stored successfully",
+                        "stored_alerts": stored_alerts,
+                        "live_alerts_sent": 0,
+                    })
+                }
+
             route, payload, _ = build_slack_payload_from_multipart(fields, files)
+            slack_response = send_slack_message(route, payload)
+            slack_file_uploads = count_slack_file_blocks(payload)
+            return {
+                "statusCode": 200,
+                "body": json.dumps({
+                    "message": "Webhook processed successfully",
+                    "slack_status": slack_response.status_code,
+                    "slack_file_uploads": slack_file_uploads,
+                })
+            }
 
         elif "application/json" in content_type.lower():
             body = parse_json_body(event)
 
             if isinstance(body.get("data"), list) and body["data"]:
-                route, payload, _ = build_slack_payload_from_cradlepoint_item(
-                    body["data"][0],
-                    event=event,
-                    channel_id_override=body.get("slack_channel_id_override"),
-                )
-            else:
-                route, payload, _ = build_slack_payload_from_json(body)
+                records = build_webhook_storage_records(event, body=body)
+                stored_alerts = persist_alert_records(records)
+                return {
+                    "statusCode": 200,
+                    "body": json.dumps({
+                        "message": "Webhook stored successfully",
+                        "stored_alerts": stored_alerts,
+                        "live_alerts_sent": 0,
+                    })
+                }
+
+            route, payload, _ = build_slack_payload_from_json(body)
+            slack_response = send_slack_message(route, payload)
+            slack_file_uploads = count_slack_file_blocks(payload)
+            return {
+                "statusCode": 200,
+                "body": json.dumps({
+                    "message": "Webhook processed successfully",
+                    "slack_status": slack_response.status_code,
+                    "slack_file_uploads": slack_file_uploads,
+                })
+            }
 
         else:
             raise ValueError(f"Unsupported Content-Type: {content_type}")
-
-        slack_response = send_slack_message(route, payload)
-        slack_file_uploads = count_slack_file_blocks(payload)
-
-        return {
-            "statusCode": 200,
-            "body": json.dumps({
-                "message": "Webhook processed successfully",
-                "slack_status": slack_response.status_code,
-                "slack_file_uploads": slack_file_uploads,
-            })
-        }
 
     except HTTPRequestError as e:
         logger.exception("Slack request failed")

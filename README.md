@@ -1,6 +1,6 @@
 # netCloudSlackAlert
 
-AWS Lambda webhook that accepts alert payloads and forwards them to Slack.
+AWS Lambda webhook that accepts alert payloads, stores Cradlepoint alerts in DynamoDB for hourly Slack summaries, and still sends camera monitor alerts to Slack immediately.
 
 Today the Lambda supports two alert sources:
 
@@ -13,9 +13,11 @@ It is designed so each source can route to a different Slack destination, which 
 
 - Accepts `application/json` and `multipart/form-data` requests.
 - Detects the alert source from the payload.
-- Builds a Slack message with a timestamp converted to Eastern time.
-- Sends image content either through direct Slack file upload or through presigned S3 URLs, depending on the route configuration.
-- Allows a per-request Slack channel override for bot-token based routes.
+- Normalizes and stores Cradlepoint alerts in DynamoDB.
+- Does not send live Slack messages for Cradlepoint alerts.
+- Keeps `umci camera monitor` alerts on their existing immediate Slack path.
+- Sends hourly Cradlepoint Slack summaries from an EventBridge schedule.
+- Keeps Cradlepoint production and test routes separated by API path.
 
 ## Supported Sources
 
@@ -99,15 +101,33 @@ For Cradlepoint, the Lambda can differentiate production vs test alerts without 
 - paths ending in `/test`
 - paths containing `cradlepoint-test`
 
-If the request matches one of those patterns and `SLACK_URL_CRADLEPOINT_TEST` is set, the Lambda posts that Cradlepoint alert to the test Slack webhook. Otherwise it uses `SLACK_URL_CRADLEPOINT`.
+If the request matches one of those patterns and `SLACK_URL_CRADLEPOINT_TEST` is set, the Lambda sends that route's hourly summary to the test Slack webhook. Otherwise it uses `SLACK_URL_CRADLEPOINT`.
 
-If a route has both `bot_token` and `channel_id`, the Lambda uses Slack Web API calls:
+If a route has both `bot_token` and `channel_id`, the Lambda uses Slack Web API calls for summary delivery:
 
 - `files.getUploadURLExternal`
 - `files.completeUploadExternal`
 - `chat.postMessage`
 
-Otherwise, it posts to the configured Slack webhook URL and stores binary images in S3 first so Slack can load them from presigned URLs.
+Otherwise, it posts summary messages to the configured Slack webhook URL.
+
+## Data Storage And Summaries
+
+Each Cradlepoint webhook alert is stored as a normalized record in DynamoDB. The Lambda groups records by source and route, then on the hourly schedule it summarizes the previous completed hour.
+
+The current summary includes:
+
+- summary window start and end time
+- total alert count
+- alert categories with counts and affected device counts
+- alert detail lines with timestamp, alert name, device, MAC, and status
+- deletion of the summarized Cradlepoint records after a successful summary send
+
+Current behavior:
+
+- Cradlepoint webhook requests: store only
+- camera monitor webhook requests: send live Slack alerts
+- scheduled EventBridge invocation: query DynamoDB, send Cradlepoint summaries, then delete the summarized records
 
 ## Environment Variables
 
@@ -116,15 +136,54 @@ Required:
 - `SLACK_URL_CRADLEPOINT`
 - `SLACK_URL_CAM_MON`
 - `S3_BUCKET_NAME`
+- `DYNAMODB_ALERT_TABLE`
 
 Optional:
 
 - `SLACK_URL_CRADLEPOINT_TEST`
 - `SLACK_BOT_TOKEN_CAM_MON`
 - `SLACK_CHANNEL_ID_CAM_MON`
+- `DYNAMODB_ALERT_GSI_NAME` default `gsi1`
+- `ALERT_RETENTION_DAYS` default `30`
 - `PRESIGNED_URL_EXPIRES` default `3600`
 - `SLACK_POST_RETRY_DELAY_SECONDS` default `1.5`
 - `SLACK_POST_MAX_ATTEMPTS` default `5`
+
+## AWS Setup For Hourly Summaries
+
+You need three AWS pieces for the hourly-summary flow:
+
+1. an API Gateway route for incoming webhooks
+2. a DynamoDB table for stored alerts
+3. an EventBridge schedule that invokes the Lambda every hour
+
+### DynamoDB Table
+
+Recommended table:
+
+- table name: `netCloudSlackAlertEvents`
+- partition key: `pk` (String)
+- sort key: `sk` (String)
+
+Recommended global secondary index:
+
+- index name: `gsi1`
+- partition key: `gsi1pk` (String)
+- sort key: `gsi1sk` (String)
+
+The Lambda stores one normalized item per incoming Cradlepoint alert and uses `gsi1` to read the last hour of alerts for each route bucket.
+
+### EventBridge Schedule
+
+Create an hourly EventBridge rule that targets this same Lambda.
+
+Suggested schedule expression:
+
+```text
+rate(1 hour)
+```
+
+On each scheduled invocation, the Lambda summarizes the previous completed hour and posts one Cradlepoint summary per route that had alerts during that window.
 
 ## AWS Setup For A Cradlepoint Test Feed
 
@@ -199,7 +258,7 @@ Install dev dependencies:
 make install-dev
 ```
 
-Run the saved test event locally with mocked Slack and S3 calls:
+Run the saved test event locally with mocked Slack, S3, and DynamoDB calls:
 
 ```bash
 make test
@@ -227,13 +286,13 @@ Successful requests return HTTP `200` with a body like:
 
 ```json
 {
-  "message": "Webhook processed successfully",
-  "slack_status": 200,
-  "slack_file_uploads": 1
+  "message": "Webhook stored successfully",
+  "stored_alerts": 1,
+  "live_alerts_sent": 0
 }
 ```
 
 Failures return:
 
-- HTTP `502` for Slack request errors
+- HTTP `502` for summary Slack request errors
 - HTTP `500` for payload parsing or other processing errors
