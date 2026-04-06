@@ -166,8 +166,8 @@ def normalize_source(source):
     if s in {"cradlepoint", "netcloud", "netcloud manager"}:
         return "cradlepoint"
 
-    if s in {"cam_mon", "camera", "camera monitor", "umci camera monitor"}:
-        return "cam_mon"
+    if s == "umci camera monitor":
+        return "umci camera monitor"
 
     raise ValueError(f"Unsupported source: {source}")
 
@@ -179,7 +179,7 @@ def select_slack_route(source):
             "bot_token": None,
             "channel_id": None,
         },
-        "cam_mon": {
+        "umci camera monitor": {
             "webhook_url": SLACK_URL_CAM_MON,
             "bot_token": SLACK_BOT_TOKEN_CAM_MON,
             "channel_id": SLACK_CHANNEL_ID_CAM_MON,
@@ -199,6 +199,13 @@ def with_channel_override(route, channel_id_override):
 
 def format_message_for_slack(message):
     return (message or "[No message supplied]").strip()
+
+
+def resolve_alert_title(source, title=None, default_title="Alert"):
+    if source == "umci camera monitor":
+        return (title or "").strip() or "Camera Alert"
+
+    return default_title
 
 
 def build_basic_slack_payload(title, timestamp, message, fallback_text):
@@ -406,10 +413,10 @@ def build_slack_payload_from_json(body):
     timestamp = format_time_to_eastern(body.get("timestamp"))
     text = body.get("text") or body.get("message") or "[No message supplied]"
 
-    title = (
-        "Camera Alert"
-        if source == "cam_mon"
-        else "Cradlepoint Alert"
+    title = resolve_alert_title(
+        source,
+        body.get("title"),
+        default_title="Cradlepoint Alert",
     )
 
     payload = build_basic_slack_payload(title, timestamp, text, text)
@@ -502,10 +509,10 @@ def build_slack_payload_from_multipart(fields, files):
     if not uploaded_images:
         raise ValueError("No files found in 'images' field")
 
-    title = (
-        "Camera Alert"
-        if source == "cam_mon"
-        else "Alert"
+    title = resolve_alert_title(
+        source,
+        fields.get("title"),
+        default_title="Alert",
     )
 
     payload = build_basic_slack_payload(title, timestamp, message, message)
