@@ -19,6 +19,7 @@ logger.setLevel(logging.INFO)
 s3 = boto3.client("s3")
 
 SLACK_URL_CRADLEPOINT = os.environ["SLACK_URL_CRADLEPOINT"]
+SLACK_URL_CRADLEPOINT_TEST = os.environ.get("SLACK_URL_CRADLEPOINT_TEST")
 SLACK_URL_CAM_MON = os.environ["SLACK_URL_CAM_MON"]
 SLACK_BOT_TOKEN_CAM_MON = os.environ.get("SLACK_BOT_TOKEN_CAM_MON")
 SLACK_CHANNEL_ID_CAM_MON = os.environ.get("SLACK_CHANNEL_ID_CAM_MON")
@@ -172,10 +173,34 @@ def normalize_source(source):
     raise ValueError(f"Unsupported source: {source}")
 
 
-def select_slack_route(source):
+def get_request_path(event):
+    if not isinstance(event, dict):
+        return ""
+
+    return (
+        event.get("rawPath")
+        or event.get("path")
+        or ((event.get("requestContext") or {}).get("http") or {}).get("path")
+        or ""
+    )
+
+
+def is_test_cradlepoint_route(event):
+    path = get_request_path(event).strip().lower()
+    if not path:
+        return False
+
+    return path.endswith("/test") or "cradlepoint-test" in path
+
+
+def select_slack_route(source, event=None):
     route_map = {
         "cradlepoint": {
-            "webhook_url": SLACK_URL_CRADLEPOINT,
+            "webhook_url": (
+                SLACK_URL_CRADLEPOINT_TEST
+                if is_test_cradlepoint_route(event) and SLACK_URL_CRADLEPOINT_TEST
+                else SLACK_URL_CRADLEPOINT
+            ),
             "bot_token": None,
             "channel_id": None,
         },
@@ -444,9 +469,9 @@ def build_slack_payload_from_json(body):
     return route, payload, uploaded_images
 
 
-def build_slack_payload_from_cradlepoint_item(item, channel_id_override=None):
+def build_slack_payload_from_cradlepoint_item(item, event=None, channel_id_override=None):
     source = "cradlepoint"
-    route = with_channel_override(select_slack_route(source), channel_id_override)
+    route = with_channel_override(select_slack_route(source, event=event), channel_id_override)
 
     created_at = item.get("created_at") or item.get("detected_at")
     formatted_time = format_time_to_eastern(created_at)
@@ -687,7 +712,8 @@ def lambda_handler(event, context):
             if isinstance(body.get("data"), list) and body["data"]:
                 route, payload, _ = build_slack_payload_from_cradlepoint_item(
                     body["data"][0],
-                    body.get("slack_channel_id_override"),
+                    event=event,
+                    channel_id_override=body.get("slack_channel_id_override"),
                 )
             else:
                 route, payload, _ = build_slack_payload_from_json(body)

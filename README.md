@@ -86,12 +86,20 @@ For multipart requests, at least one `images` file is required.
 Routing is selected by normalized source:
 
 - `cradlepoint` uses `SLACK_URL_CRADLEPOINT`
+- `cradlepoint` requests sent to a test path can use `SLACK_URL_CRADLEPOINT_TEST`
 - `umci camera monitor` uses the camera-monitor Slack settings:
   - `SLACK_URL_CAM_MON`
   - `SLACK_BOT_TOKEN_CAM_MON`
   - `SLACK_CHANNEL_ID_CAM_MON`
 
 The environment variable names still use `CAM_MON`, but the payload source value is `umci camera monitor`.
+
+For Cradlepoint, the Lambda can differentiate production vs test alerts without any payload changes by looking at the API Gateway request path:
+
+- paths ending in `/test`
+- paths containing `cradlepoint-test`
+
+If the request matches one of those patterns and `SLACK_URL_CRADLEPOINT_TEST` is set, the Lambda posts that Cradlepoint alert to the test Slack webhook. Otherwise it uses `SLACK_URL_CRADLEPOINT`.
 
 If a route has both `bot_token` and `channel_id`, the Lambda uses Slack Web API calls:
 
@@ -111,11 +119,77 @@ Required:
 
 Optional:
 
+- `SLACK_URL_CRADLEPOINT_TEST`
 - `SLACK_BOT_TOKEN_CAM_MON`
 - `SLACK_CHANNEL_ID_CAM_MON`
 - `PRESIGNED_URL_EXPIRES` default `3600`
 - `SLACK_POST_RETRY_DELAY_SECONDS` default `1.5`
 - `SLACK_POST_MAX_ATTEMPTS` default `5`
+
+## AWS Setup For A Cradlepoint Test Feed
+
+If you cannot change the Cradlepoint payload, create a second API Gateway endpoint and let the Lambda route based on the request path.
+
+Suggested pattern:
+
+- production URL: `/webhook`
+- test URL: `/webhook/test`
+
+### 1. Add the test Slack webhook to Lambda
+
+In the Lambda environment variables, add:
+
+```text
+SLACK_URL_CRADLEPOINT_TEST=https://hooks.slack.com/services/...
+```
+
+Keep your existing production variable:
+
+```text
+SLACK_URL_CRADLEPOINT=https://hooks.slack.com/services/...
+```
+
+### 2. Add a second API Gateway route
+
+In API Gateway for this Lambda:
+
+1. Open your HTTP API.
+2. Go to `Routes`.
+3. Create a new route:
+   - method: `POST`
+   - path: `/webhook/test`
+4. Attach it to the same Lambda integration already used by `/webhook`.
+5. Deploy the API.
+
+After deployment you should have two usable URLs:
+
+- `https://<api-id>.execute-api.<region>.amazonaws.com/Prod/webhook`
+- `https://<api-id>.execute-api.<region>.amazonaws.com/Prod/webhook/test`
+
+### 3. Point the Cradlepoint test feed at the new URL
+
+Leave production Cradlepoint sending to:
+
+```text
+.../Prod/webhook
+```
+
+Send the Cradlepoint test feed to:
+
+```text
+.../Prod/webhook/test
+```
+
+The payload can remain identical for both.
+
+### 4. Confirm routing
+
+Expected behavior:
+
+- `/webhook` -> `SLACK_URL_CRADLEPOINT`
+- `/webhook/test` -> `SLACK_URL_CRADLEPOINT_TEST`
+
+If `SLACK_URL_CRADLEPOINT_TEST` is not set, test-path requests fall back to the production Cradlepoint webhook.
 
 ## Local Development
 
