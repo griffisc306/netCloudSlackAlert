@@ -25,6 +25,9 @@ ddb_deserializer = TypeDeserializer()
 
 SLACK_URL_CRADLEPOINT = os.environ["SLACK_URL_CRADLEPOINT"]
 SLACK_URL_CRADLEPOINT_TEST = os.environ.get("SLACK_URL_CRADLEPOINT_TEST")
+SLACK_BOT_TOKEN_CRADLEPOINT_SUMMARY = os.environ.get("SLACK_BOT_TOKEN_CRADLEPOINT_SUMMARY")
+SLACK_CHANNEL_ID_CRADLEPOINT_SUMMARY = os.environ.get("SLACK_CHANNEL_ID_CRADLEPOINT_SUMMARY")
+SLACK_CHANNEL_ID_CRADLEPOINT_SUMMARY_TEST = os.environ.get("SLACK_CHANNEL_ID_CRADLEPOINT_SUMMARY_TEST")
 SLACK_URL_CAM_MON = os.environ["SLACK_URL_CAM_MON"]
 SLACK_BOT_TOKEN_CAM_MON = os.environ.get("SLACK_BOT_TOKEN_CAM_MON")
 SLACK_CHANNEL_ID_CAM_MON = os.environ.get("SLACK_CHANNEL_ID_CAM_MON")
@@ -555,22 +558,43 @@ def format_table(headers, rows):
     return "```" + "\n".join(table_lines) + "```"
 
 
-def summarize_record_details(records, limit=15):
+def summarize_record_details_table(records, limit=15):
+    sorted_records = sorted(records, key=lambda record: record.get("detected_at", ""))
+    rows = []
+
+    for record in sorted_records[:limit]:
+        rows.append([
+            titleize_alert_name(record.get("alert_name", "Unknown")),
+            truncate_text(record.get("device_mac", "Unknown"), 17),
+            truncate_text(record.get("device_name", "Unknown"), 18),
+            truncate_text(record.get("status", "[No message supplied]"), 48),
+            truncate_text(record.get("display_timestamp", ""), 22),
+        ])
+
+    remaining = len(sorted_records) - limit
+    table = format_table(
+        ["Alert Name", "MAC Address", "Device Name", "Status", "Timestamp"],
+        rows,
+    )
+
+    if remaining > 0:
+        return table + f"\n_...and {remaining} more alerts_"
+
+    return table
+
+
+def summarize_record_details_linked(records, limit=15):
     sorted_records = sorted(records, key=lambda record: record.get("detected_at", ""))
     lines = []
 
     for record in sorted_records[:limit]:
         device_url = build_cradlepoint_device_url(record.get("router_id"))
-        device_name = format_slack_link(
-            truncate_text(record.get("device_name", "Unknown"), 24),
-            device_url,
-        )
         lines.append(
-            f"*Alert Name:* {titleize_alert_name(record.get('alert_name', 'Unknown'))}\n"
-            f"*MAC Address:* {truncate_text(record.get('device_mac', 'Unknown'), 17)}\n"
-            f"*Device Name:* {device_name}\n"
-            f"*Status:* {truncate_text(record.get('status', '[No message supplied]'), 72)}\n"
-            f"*Timestamp:* {truncate_text(record.get('display_timestamp', ''), 22)}"
+            f"*Alert Name:* {format_slack_link(titleize_alert_name(record.get('alert_name', 'Unknown')), device_url)}\n"
+            f"*MAC Address:* {format_slack_link(truncate_text(record.get('device_mac', 'Unknown'), 17), device_url)}\n"
+            f"*Device Name:* {format_slack_link(truncate_text(record.get('device_name', 'Unknown'), 24), device_url)}\n"
+            f"*Status:* {format_slack_link(truncate_text(record.get('status', '[No message supplied]'), 72), device_url)}\n"
+            f"*Timestamp:* {format_slack_link(truncate_text(record.get('display_timestamp', ''), 22), device_url)}"
         )
 
     remaining = len(sorted_records) - limit
@@ -583,27 +607,38 @@ def summarize_record_details(records, limit=15):
     return "\n\n".join(lines)
 
 
+def summarize_record_details(records, limit=15, link_all_fields=False):
+    if link_all_fields:
+        return summarize_record_details_linked(records, limit=limit)
+    return summarize_record_details_table(records, limit=limit)
+
+
 def select_summary_route(source, route_key):
     if source == "cradlepoint":
+        summary_channel_id = (
+            SLACK_CHANNEL_ID_CRADLEPOINT_SUMMARY_TEST
+            if route_key == "test"
+            else SLACK_CHANNEL_ID_CRADLEPOINT_SUMMARY
+        )
         return {
             "webhook_url": (
                 SLACK_URL_CRADLEPOINT_TEST
                 if route_key == "test" and SLACK_URL_CRADLEPOINT_TEST
                 else SLACK_URL_CRADLEPOINT
             ),
-            "bot_token": None,
-            "channel_id": None,
+            "bot_token": SLACK_BOT_TOKEN_CRADLEPOINT_SUMMARY,
+            "channel_id": summary_channel_id,
         }
 
     return select_slack_route(source)
 
 
-def build_hourly_summary_payload(source, route_key, records, start_dt, end_dt):
+def build_hourly_summary_payload(source, route_key, records, start_dt, end_dt, link_all_fields=False):
     source_label = "Cradlepoint" if source == "cradlepoint" else "UMCI Camera Monitor"
     route_label = route_key.upper()
     account_name = records[0].get("account_name") if records else source_label
     category_rows = summarize_records_by_alert(records)
-    details = summarize_record_details(records)
+    details = summarize_record_details(records, link_all_fields=link_all_fields)
     categories = format_table(
         ["Alert Name", "Alert Count", "Affected Devices"],
         [
@@ -709,7 +744,7 @@ def iter_summary_targets():
     if SLACK_URL_CRADLEPOINT:
         yield "cradlepoint", "prod"
 
-    if SLACK_URL_CRADLEPOINT_TEST:
+    if SLACK_URL_CRADLEPOINT_TEST or SLACK_CHANNEL_ID_CRADLEPOINT_SUMMARY_TEST:
         yield "cradlepoint", "test"
 
 
@@ -727,7 +762,14 @@ def send_hourly_summaries(event):
             continue
 
         route = select_summary_route(source, route_key)
-        payload = build_hourly_summary_payload(source, route_key, records, window_start, window_end)
+        payload = build_hourly_summary_payload(
+            source,
+            route_key,
+            records,
+            window_start,
+            window_end,
+            link_all_fields=(source == "cradlepoint" and bool(route.get("bot_token") and route.get("channel_id"))),
+        )
         send_slack_message(route, payload)
         deleted_alerts += delete_alert_records(records)
         summaries_sent += 1
