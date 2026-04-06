@@ -352,6 +352,7 @@ def build_cradlepoint_storage_record(item, event):
         "alert_name": normalize_string(item.get("alert_type") or item.get("type"), "Unknown"),
         "device_name": normalize_string(device_name),
         "device_mac": normalize_string(device_mac),
+        "router_id": normalize_string(item.get("router"), ""),
         "status": normalize_string(message, "[No message supplied]"),
         "detected_at": parse_iso_datetime(detected_at).isoformat(),
         "display_timestamp": format_time_to_eastern(detected_at),
@@ -418,6 +419,7 @@ def persist_alert_records(records):
             "alert_name": record.get("alert_name") or "Unknown",
             "device_name": record.get("device_name") or "Unknown",
             "device_mac": record.get("device_mac") or "Unknown",
+            "router_id": record.get("router_id") or "",
             "status": record.get("status") or "[No message supplied]",
             "display_timestamp": record.get("display_timestamp") or format_time_to_eastern(detected_dt.isoformat()),
             "detected_at": detected_dt.isoformat(),
@@ -518,6 +520,19 @@ def titleize_alert_name(value):
     return value.replace("_", " ").title()
 
 
+def build_cradlepoint_device_url(router_id):
+    router_id = str(router_id or "").strip()
+    if not router_id:
+        return None
+    return f"https://www.cradlepointecm.com/#/devices/routers/router/{router_id}/home/summary"
+
+
+def format_slack_link(label, url):
+    if not url:
+        return label
+    return f"<{url}|{label}>"
+
+
 def format_table(headers, rows):
     if not rows:
         return "_No alerts in this window_"
@@ -542,27 +557,30 @@ def format_table(headers, rows):
 
 def summarize_record_details(records, limit=15):
     sorted_records = sorted(records, key=lambda record: record.get("detected_at", ""))
-    rows = []
+    lines = []
 
     for record in sorted_records[:limit]:
-        rows.append([
-            titleize_alert_name(record.get("alert_name", "Unknown")),
-            truncate_text(record.get("device_mac", "Unknown"), 17),
-            truncate_text(record.get("device_name", "Unknown"), 18),
-            truncate_text(record.get("status", "[No message supplied]"), 48),
-            truncate_text(record.get("display_timestamp", ""), 22),
-        ])
+        device_url = build_cradlepoint_device_url(record.get("router_id"))
+        device_name = format_slack_link(
+            truncate_text(record.get("device_name", "Unknown"), 24),
+            device_url,
+        )
+        lines.append(
+            f"*Alert Name:* {titleize_alert_name(record.get('alert_name', 'Unknown'))}\n"
+            f"*MAC Address:* {truncate_text(record.get('device_mac', 'Unknown'), 17)}\n"
+            f"*Device Name:* {device_name}\n"
+            f"*Status:* {truncate_text(record.get('status', '[No message supplied]'), 72)}\n"
+            f"*Timestamp:* {truncate_text(record.get('display_timestamp', ''), 22)}"
+        )
 
     remaining = len(sorted_records) - limit
-    table = format_table(
-        ["Alert Name", "MAC Address", "Device Name", "Status", "Timestamp"],
-        rows,
-    )
+    if not lines:
+        return "_No alert details in this window_"
 
     if remaining > 0:
-        return table + f"\n_...and {remaining} more alerts_"
+        lines.append(f"_...and {remaining} more alerts_")
 
-    return table
+    return "\n\n".join(lines)
 
 
 def select_summary_route(source, route_key):
