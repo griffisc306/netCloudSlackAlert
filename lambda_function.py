@@ -536,6 +536,34 @@ def format_slack_link(label, url):
     return f"<{url}|{label}>"
 
 
+def build_table_raw_text_cell(text):
+    return {
+        "type": "raw_text",
+        "text": str(text or ""),
+    }
+
+
+def build_table_link_cell(label, url):
+    if not url:
+        return build_table_raw_text_cell(label)
+
+    return {
+        "type": "rich_text",
+        "elements": [
+            {
+                "type": "rich_text_section",
+                "elements": [
+                    {
+                        "type": "link",
+                        "url": url,
+                        "text": str(label or ""),
+                    }
+                ],
+            }
+        ],
+    }
+
+
 def format_table(headers, rows):
     if not rows:
         return "_No alerts in this window_"
@@ -583,34 +611,100 @@ def summarize_record_details_table(records, limit=15):
     return table
 
 
-def summarize_record_details_linked(records, limit=15):
+def summarize_record_details(records, limit=15):
+    return summarize_record_details_table(records, limit=limit)
+
+
+def summarize_record_details_rich(records, limit=12):
     sorted_records = sorted(records, key=lambda record: record.get("detected_at", ""))
-    lines = []
+    rows = [[
+        build_table_raw_text_cell("Alert Name"),
+        build_table_raw_text_cell("Device Name"),
+        build_table_raw_text_cell("MAC Address"),
+        build_table_raw_text_cell("Timestamp"),
+        build_table_raw_text_cell("Status"),
+        build_table_raw_text_cell(" "),
+    ]]
 
     for record in sorted_records[:limit]:
         device_url = build_cradlepoint_device_url(record.get("router_id"))
-        lines.append(
-            f"*Alert Name:* {format_slack_link(titleize_alert_name(record.get('alert_name', 'Unknown')), device_url)}\n"
-            f"*MAC Address:* {format_slack_link(truncate_text(record.get('device_mac', 'Unknown'), 17), device_url)}\n"
-            f"*Device Name:* {format_slack_link(truncate_text(record.get('device_name', 'Unknown'), 24), device_url)}\n"
-            f"*Status:* {format_slack_link(truncate_text(record.get('status', '[No message supplied]'), 72), device_url)}\n"
-            f"*Timestamp:* {format_slack_link(truncate_text(record.get('display_timestamp', ''), 22), device_url)}"
-        )
+        alert_name = titleize_alert_name(record.get("alert_name", "Unknown"))
+        device_name = normalize_string(record.get("device_name"), "Unknown")
+        device_mac = normalize_string(record.get("device_mac"), "Unknown")
+        timestamp = normalize_string(record.get("display_timestamp"), "")
+        status = normalize_string(record.get("status"), "[No message supplied]")
+
+        rows.append([
+            build_table_raw_text_cell(truncate_text(alert_name, 32)),
+            build_table_raw_text_cell(truncate_text(device_name, 22)),
+            build_table_raw_text_cell(truncate_text(device_mac, 17)),
+            build_table_raw_text_cell(truncate_text(timestamp, 22)),
+            build_table_raw_text_cell(truncate_text(status, 72)),
+            build_table_link_cell("Open Device", device_url),
+        ])
 
     remaining = len(sorted_records) - limit
-    if not lines:
-        return "_No alert details in this window_"
+    blocks = [{
+        "type": "table",
+        "column_settings": [
+            {"is_wrapped": False},
+            {"is_wrapped": False},
+            {"is_wrapped": False},
+            {"is_wrapped": False},
+            {"is_wrapped": True},
+            {"is_wrapped": False},
+        ],
+        "rows": rows,
+    }]
 
     if remaining > 0:
-        lines.append(f"_...and {remaining} more alerts_")
+        blocks.append({
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"Showing {limit} most recent alerts. {remaining} more alert(s) were omitted from the detail view.",
+                }
+            ],
+        })
 
-    return "\n\n".join(lines)
+    return blocks
 
 
-def summarize_record_details(records, limit=15, link_all_fields=False):
-    if link_all_fields:
-        return summarize_record_details_linked(records, limit=limit)
-    return summarize_record_details_table(records, limit=limit)
+def build_category_summary_blocks(records):
+    category_rows = summarize_records_by_alert(records)
+    if not category_rows:
+        return [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "_No alerts in this window_",
+                },
+            }
+        ]
+
+    blocks = []
+
+    for index, row in enumerate(category_rows):
+        blocks.append({
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*{titleize_alert_name(row['alert_name'])}*",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"{row['alert_count']} alerts • {row['affected_devices']} devices",
+                },
+            ],
+        })
+
+        if index < len(category_rows) - 1:
+            blocks.append({"type": "divider"})
+
+    return blocks
 
 
 def select_summary_route(source, route_key):
@@ -633,12 +727,89 @@ def select_summary_route(source, route_key):
     return select_slack_route(source)
 
 
-def build_hourly_summary_payload(source, route_key, records, start_dt, end_dt, link_all_fields=False):
+def build_hourly_summary_payload(source, route_key, records, start_dt, end_dt, route=None):
     source_label = "Cradlepoint" if source == "cradlepoint" else "UMCI Camera Monitor"
     route_label = route_key.upper()
     account_name = records[0].get("account_name") if records else source_label
+    use_rich_cradlepoint_layout = (
+        source == "cradlepoint"
+        and route is not None
+        and route_supports_direct_slack_upload(route)
+    )
+
+    if use_rich_cradlepoint_layout:
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"{source_label} Alert Summary",
+                    "emoji": True,
+                }
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Route:* {route_label}",
+                    }
+                ]
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Account Name*\n{account_name}",
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Total Alerts*\n{len(records)}",
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Start Time*\n{format_time_to_utc(start_dt.isoformat())}",
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*End Time*\n{format_time_to_utc(end_dt.isoformat())}",
+                    },
+                ],
+            },
+            {
+                "type": "divider",
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Alert Categories*",
+                }
+            },
+        ]
+        blocks.extend(build_category_summary_blocks(records))
+        blocks.extend([
+            {
+                "type": "divider",
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Alert Details*",
+                }
+            },
+        ])
+        blocks.extend(summarize_record_details_rich(records))
+
+        return {
+            "text": f"{source_label} hourly alert summary ({route_label})",
+            "blocks": blocks,
+        }
+
     category_rows = summarize_records_by_alert(records)
-    details = summarize_record_details(records, link_all_fields=link_all_fields)
+    details = summarize_record_details(records)
     categories = format_table(
         ["Alert Name", "Alert Count", "Affected Devices"],
         [
@@ -762,14 +933,7 @@ def send_hourly_summaries(event):
             continue
 
         route = select_summary_route(source, route_key)
-        payload = build_hourly_summary_payload(
-            source,
-            route_key,
-            records,
-            window_start,
-            window_end,
-            link_all_fields=(source == "cradlepoint" and bool(route.get("bot_token") and route.get("channel_id"))),
-        )
+        payload = build_hourly_summary_payload(source, route_key, records, window_start, window_end, route=route)
         send_slack_message(route, payload)
         deleted_alerts += delete_alert_records(records)
         summaries_sent += 1
