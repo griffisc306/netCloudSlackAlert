@@ -88,6 +88,16 @@ def format_time_to_eastern(dt_str=None):
     return dt.astimezone(eastern).strftime("%m/%d/%Y %I:%M %p")
 
 
+def format_time_to_eastern_with_zone(dt_str=None):
+    try:
+        dt = parse_iso_datetime(dt_str)
+    except Exception:
+        dt = utc_now()
+
+    eastern = ZoneInfo("America/New_York")
+    return dt.astimezone(eastern).strftime("%m/%d/%Y %I:%M %p %Z")
+
+
 def get_header(event, name):
     headers = event.get("headers") or {}
     for k, v in headers.items():
@@ -729,7 +739,6 @@ def select_summary_route(source, route_key):
 
 def build_hourly_summary_payload(source, route_key, records, start_dt, end_dt, route=None):
     source_label = "Cradlepoint" if source == "cradlepoint" else "UMCI Camera Monitor"
-    route_label = route_key.upper()
     account_name = records[0].get("account_name") if records else source_label
     use_rich_cradlepoint_layout = (
         source == "cradlepoint"
@@ -748,15 +757,6 @@ def build_hourly_summary_payload(source, route_key, records, start_dt, end_dt, r
                 }
             },
             {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*Route:* {route_label}",
-                    }
-                ]
-            },
-            {
                 "type": "section",
                 "fields": [
                     {
@@ -769,11 +769,11 @@ def build_hourly_summary_payload(source, route_key, records, start_dt, end_dt, r
                     },
                     {
                         "type": "mrkdwn",
-                        "text": f"*Start Time*\n{format_time_to_utc(start_dt.isoformat())}",
+                        "text": f"*Start Time*\n{format_time_to_eastern_with_zone(start_dt.isoformat())}",
                     },
                     {
                         "type": "mrkdwn",
-                        "text": f"*End Time*\n{format_time_to_utc(end_dt.isoformat())}",
+                        "text": f"*End Time*\n{format_time_to_eastern_with_zone(end_dt.isoformat())}",
                     },
                 ],
             },
@@ -804,7 +804,7 @@ def build_hourly_summary_payload(source, route_key, records, start_dt, end_dt, r
         blocks.extend(summarize_record_details_rich(records))
 
         return {
-            "text": f"{source_label} hourly alert summary ({route_label})",
+            "text": f"{source_label} hourly alert summary",
             "blocks": blocks,
         }
 
@@ -823,7 +823,7 @@ def build_hourly_summary_payload(source, route_key, records, start_dt, end_dt, r
     )
 
     return {
-        "text": f"{source_label} hourly alert summary ({route_label})",
+        "text": f"{source_label} hourly alert summary",
         "blocks": [
             {
                 "type": "header",
@@ -835,15 +835,6 @@ def build_hourly_summary_payload(source, route_key, records, start_dt, end_dt, r
             },
             {
                 "type": "divider",
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"*Route:* {route_label}",
-                    }
-                ]
             },
             {
                 "type": "section",
@@ -858,11 +849,11 @@ def build_hourly_summary_payload(source, route_key, records, start_dt, end_dt, r
                     },
                     {
                         "type": "mrkdwn",
-                        "text": f"*Start Time*\n{format_time_to_utc(start_dt.isoformat())}",
+                        "text": f"*Start Time*\n{format_time_to_eastern_with_zone(start_dt.isoformat())}",
                     },
                     {
                         "type": "mrkdwn",
-                        "text": f"*End Time*\n{format_time_to_utc(end_dt.isoformat())}",
+                        "text": f"*End Time*\n{format_time_to_eastern_with_zone(end_dt.isoformat())}",
                     },
                 ],
             },
